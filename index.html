@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>Breadcrumb — Find Your Way Back</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Leaflet (optional, needs internet). App works without it. -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span id="title">🧭 Breadcrumb</span>
+    <span id="status" class="status idle">idle</span>
+  </header>
+
+  <main>
+    <!-- COMPASS / ARROW VIEW -->
+    <section id="navView" class="card">
+      <div id="targetLabel" class="target-label">Target: <b>none</b></div>
+
+      <div id="arrowWrap" class="arrow-wrap">
+        <div id="arrow" class="arrow">↑</div>
+        <div id="noHeading" class="no-heading hidden">point phone flat, move a bit to calibrate compass</div>
+      </div>
+
+      <div class="readouts">
+        <div class="readout"><span class="big" id="distOut">—</span><span class="unit">to target</span></div>
+        <div class="readout"><span class="big" id="bearOut">—</span><span class="unit">bearing</span></div>
+        <div class="readout"><span class="big" id="altDiffOut">—</span><span class="unit">altitude Δ</span></div>
+      </div>
+
+      <div class="meta-grid">
+        <div>pos acc: <b id="accOut">—</b></div>
+        <div>alt: <b id="altOut">—</b></div>
+        <div>heading: <b id="headOut">—</b></div>
+        <div>points: <b id="ptCountOut">0</b></div>
+      </div>
+    </section>
+
+    <!-- TARGET PICKER -->
+    <section class="card">
+      <label for="targetSelect" class="lbl">Navigate back to</label>
+      <select id="targetSelect"></select>
+    </section>
+
+    <!-- MAP (optional) -->
+    <section class="card">
+      <button id="mapToggle" class="ghost">Show map ▾</button>
+      <div id="map" class="hidden"></div>
+      <div id="mapHint" class="hint hidden">Map tiles need internet. Arrow above always works offline.</div>
+    </section>
+
+    <!-- WAYPOINT LIST -->
+    <section class="card">
+      <div class="lbl">Waypoints &amp; trail</div>
+      <ul id="wpList" class="wp-list"></ul>
+    </section>
+  </main>
+
+  <!-- CONTROL BAR -->
+  <footer id="controls">
+    <button id="startBtn" class="primary">▶ Start</button>
+    <button id="markBtn" class="accent" disabled>📍 Mark</button>
+    <button id="stopBtn" class="danger" disabled>■ Stop</button>
+    <button id="clearBtn" class="ghost">🗑 Clear</button>
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

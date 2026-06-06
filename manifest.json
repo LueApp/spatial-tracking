@@ -1,0 +1,14 @@
+{
+  "name": "Breadcrumb — Find Your Way Back",
+  "short_name": "Breadcrumb",
+  "description": "Record your GPS trail and navigate back to the start or saved waypoints.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
