@@ -19,6 +19,38 @@
     <span id="status" class="status idle">idle</span>
   </header>
 
+  <!-- Pre-flight modal: shown before permission dialog when overlays may block it -->
+  <div id="preflight" class="hidden" role="dialog" aria-modal="true">
+    <div class="preflight-box">
+      <div class="preflight-title">📍 Location access needed</div>
+      <p class="preflight-body">Your browser will ask for permission. For the dialog to appear, overlay apps must not be covering the screen:</p>
+      <ol class="preflight-steps">
+        <li>Swipe away any <strong>chat bubbles</strong></li>
+        <li>Exit <strong>Picture-in-Picture</strong> video</li>
+        <li>Disable <strong>screen filter / Blue Light</strong> overlay apps</li>
+      </ol>
+      <p class="preflight-body">Once the screen is clear, tap <strong>Continue</strong> — the permission dialog will appear immediately.</p>
+      <div class="preflight-actions">
+        <button id="preflightCancel">Cancel</button>
+        <button id="preflightOk">Continue →</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="errBanner" class="hidden">
+    <div class="err-title" id="errTitle">Location error</div>
+    <div id="errMsg"></div>
+    <ol id="errSteps" class="hidden">
+      <li>Close all floating apps: chat bubbles, screen filters, PiP video, overlays</li>
+      <li>Return here and tap <strong>Try Again</strong></li>
+      <li>If still blocked: browser Settings → Site settings → Location → allow this site</li>
+    </ol>
+    <div class="err-actions">
+      <button id="errRetry">Try Again</button>
+      <button id="errDismiss">Dismiss</button>
+    </div>
+  </div>
+
   <main>
     <!-- COMPASS / ARROW VIEW -->
     <section id="navView" class="card">

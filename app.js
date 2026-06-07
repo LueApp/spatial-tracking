@@ -63,7 +63,20 @@ const els = {
   start: $('startBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
   map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'),
   wpList: $('wpList'),
+  errBanner: $('errBanner'), errTitle: $('errTitle'), errMsg: $('errMsg'),
+  errSteps: $('errSteps'), errDismiss: $('errDismiss'), errRetry: $('errRetry'),
+  preflight: $('preflight'), preflightOk: $('preflightOk'), preflightCancel: $('preflightCancel'),
 };
+
+function showErr(title, msg, showSteps) {
+  els.errTitle.textContent = title;
+  els.errMsg.textContent = msg;
+  els.errSteps.classList.toggle('hidden', !showSteps);
+  els.errBanner.classList.remove('hidden');
+}
+function hideErr() { els.errBanner.classList.add('hidden'); }
+function showPreflight() { els.preflight.classList.remove('hidden'); }
+function hidePreflight() { els.preflight.classList.add('hidden'); }
 
 function setStatus(text, cls) {
   els.status.textContent = text;
@@ -88,9 +101,42 @@ function targetName() {
 async function start() {
   if (!('geolocation' in navigator)) { setStatus('no GPS', 'error'); return; }
   if (!window.isSecureContext) {
-    alert('This page must be served over HTTPS (or localhost) for GPS to work.');
+    showErr('HTTPS required', 'This page must be served over HTTPS for GPS to work. See README.', false);
+    return;
+  }
+  hideErr();
+
+  // Check existing permission state.
+  // If already granted: watchPosition fires silently — no dialog, overlay apps can't block it.
+  // If denied: tell user to fix in settings before we even try.
+  // If prompt (first time): show pre-flight instructions so user can clear overlays first.
+  let permState = 'prompt';
+  try {
+    const perm = await navigator.permissions.query({ name: 'geolocation' });
+    permState = perm.state; // 'granted' | 'denied' | 'prompt'
+  } catch { /* API unsupported — assume prompt, fall through */ }
+
+  if (permState === 'denied') {
+    showErr(
+      'Location permanently blocked',
+      'Permission was previously denied. To fix: open browser Settings → Site settings → Location → find this site → set to Allow, then reload.',
+      false
+    );
+    return;
   }
 
+  if (permState === 'prompt') {
+    // Show pre-flight modal — user clears overlays, then taps Continue which calls doStart()
+    showPreflight();
+    return;
+  }
+
+  // 'granted' — go directly, no dialog will appear, overlay apps don't matter
+  await doStart();
+}
+
+async function doStart() {
+  hidePreflight();
   await requestCompass();   // iOS needs this from a tap
   await requestWakeLock();  // keep screen awake so tracking continues
 
@@ -144,9 +190,19 @@ function onFix(pos) {
 }
 
 function onGeoError(err) {
-  setStatus('GPS error', 'error');
   console.warn('geo error', err);
-  if (err.code === 1) alert('Location permission denied. Enable it in browser settings.');
+  stop(); // reset UI — don't leave buttons stuck in tracking state
+  if (err.code === 1) {
+    showErr(
+      'Location permission blocked',
+      'The browser could not show the permission dialog. This usually means a floating app or overlay is covering the screen.',
+      true
+    );
+  } else if (err.code === 2) {
+    showErr('Location unavailable', 'GPS signal lost or hardware unavailable. Try moving outdoors.', false);
+  } else if (err.code === 3) {
+    showErr('Location timeout', 'GPS took too long to get a fix. Try again outdoors.', false);
+  }
 }
 
 // ---------- compass ----------
@@ -377,7 +433,11 @@ function toggleMap() {
 }
 
 // ---------- events ----------
-els.start.addEventListener('click', start);
+els.errDismiss.addEventListener('click', hideErr);
+els.errRetry.addEventListener('click', () => { hideErr(); start(); });
+els.preflightOk.addEventListener('click', doStart);
+els.preflightCancel.addEventListener('click', hidePreflight);
+els.start.addEventListener('click', () => { hideErr(); start(); });
 els.stop.addEventListener('click', stop);
 els.mark.addEventListener('click', markWaypoint);
 els.clear.addEventListener('click', clearAll);

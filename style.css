@@ -136,4 +136,58 @@ button.ghost {
   padding: 10px 14px; font-size: 14px; font-weight: 600; width: 100%;
 }
 
+/* Pre-flight modal */
+#preflight {
+  position: fixed; inset: 0; z-index: 900;
+  background: rgba(7,11,20,.88);
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 16px;
+}
+.preflight-box {
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 20px 20px 16px 16px;
+  padding: 22px 20px 20px;
+  width: 100%; max-width: 520px;
+}
+.preflight-title { font-size: 17px; font-weight: 800; margin-bottom: 12px; }
+.preflight-body { font-size: 14px; color: var(--muted); line-height: 1.5; margin: 0 0 10px; }
+.preflight-body strong { color: var(--ink); }
+.preflight-steps {
+  margin: 0 0 14px 20px; padding: 0;
+  color: var(--muted); font-size: 14px; line-height: 1.8;
+}
+.preflight-steps strong { color: var(--ink); }
+.preflight-actions { display: flex; gap: 10px; margin-top: 6px; }
+.preflight-actions button {
+  flex: 1; padding: 13px 10px; border-radius: 14px;
+  font-size: 15px; font-weight: 700; border: none;
+}
+#preflightCancel { background: var(--card); color: var(--muted); border: 1px solid var(--line); }
+#preflightOk { background: var(--primary); color: #042038; }
+
+#errBanner {
+  background: rgba(255,84,112,.10);
+  border: 1px solid var(--danger);
+  border-radius: 14px;
+  margin: 10px 12px 0;
+  padding: 14px 16px;
+  font-size: 14px;
+  max-width: 536px;
+  margin-left: auto;
+  margin-right: auto;
+}
+#errBanner .err-title { font-weight: 800; color: var(--danger); margin-bottom: 6px; font-size: 15px; }
+#errBanner #errMsg { color: var(--muted); line-height: 1.5; }
+#errBanner #errSteps { margin: 10px 0 0 18px; padding: 0; color: var(--muted); line-height: 1.7; }
+#errBanner #errSteps strong { color: var(--ink); }
+.err-actions { margin-top: 12px; }
+.err-actions { display: flex; gap: 8px; }
+.err-actions button {
+  flex: 1; padding: 10px 14px; border-radius: 999px;
+  background: var(--card2); color: var(--ink);
+  border: 1px solid var(--line); font-size: 13px; font-weight: 700;
+}
+#errRetry { background: var(--primary); color: #042038; border-color: var(--primary); }
+
 .hidden { display: none !important; }
