@@ -27,6 +27,7 @@ function bearing(a, b) { // initial bearing 0..360 from true north
 const RECORD_MIN_DIST = 5;     // meters: only store a breadcrumb if moved this far
 const RECORD_MIN_TIME = 8000;  // ms: ...or this long since last stored point
 const ARRIVE_RADIUS = 8;       // meters: "you are here"
+const GAP_WARN_MS = 60000;     // ms: gap this long means screen was probably locked
 
 const state = {
   trail: [],          // [{lat,lon,alt,acc,t}]
@@ -38,6 +39,7 @@ const state = {
   wakeLock: null,
   tracking: false,
   lastStored: 0,
+  gapTimer: null,
 };
 
 // ---------- persistence ----------
@@ -62,7 +64,7 @@ const els = {
   targetLabel: $('targetLabel'), targetSelect: $('targetSelect'),
   start: $('startBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
   map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'),
-  wpList: $('wpList'),
+  wpList: $('wpList'), lockHint: $('lockHint'),
   errBanner: $('errBanner'), errTitle: $('errTitle'), errMsg: $('errMsg'),
   errSteps: $('errSteps'), errDismiss: $('errDismiss'), errRetry: $('errRetry'),
   preflight: $('preflight'), preflightOk: $('preflightOk'), preflightCancel: $('preflightCancel'),
@@ -144,6 +146,7 @@ async function doStart() {
   els.start.disabled = true;
   els.stop.disabled = false;
   els.mark.disabled = false;
+  els.lockHint.classList.remove('hidden');
   setStatus('locating…', 'tracking');
 
   state.watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
@@ -155,10 +158,12 @@ function stop() {
   if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
   state.watchId = null;
   state.tracking = false;
+  clearTimeout(state.gapTimer);
   releaseWakeLock();
   els.start.disabled = false;
   els.stop.disabled = true;
   els.mark.disabled = true;
+  els.lockHint.classList.add('hidden');
   setStatus('stopped', 'idle');
 }
 
@@ -170,7 +175,17 @@ function onFix(pos) {
     altAcc: c.altitudeAccuracy, t: pos.timestamp,
   };
   state.current = fix;
-  setStatus('tracking', 'tracking');
+
+  // Detect screen-lock gap: if time jumped by >60s since last stored point, warn user
+  const gapMs = state.lastStored > 0 ? pos.timestamp - state.lastStored : 0;
+  if (gapMs > GAP_WARN_MS) {
+    const mins = Math.round(gapMs / 60000);
+    setStatus('gap ~' + mins + 'min (screen locked)', 'tracking');
+    clearTimeout(state.gapTimer);
+    state.gapTimer = setTimeout(() => { if (state.tracking) setStatus('tracking', 'tracking'); }, 5000);
+  } else {
+    setStatus('tracking', 'tracking');
+  }
 
   // first ever point becomes home
   const isFirst = state.trail.length === 0;
@@ -243,9 +258,15 @@ async function requestWakeLock() {
 function releaseWakeLock() {
   if (state.wakeLock) { state.wakeLock.release().catch(() => {}); state.wakeLock = null; }
 }
-// re-acquire if screen comes back
+// Screen unlocked: re-acquire wake lock AND restart watchPosition (OS may have killed it)
 document.addEventListener('visibilitychange', () => {
-  if (state.tracking && document.visibilityState === 'visible' && !state.wakeLock) requestWakeLock();
+  if (state.tracking && document.visibilityState === 'visible') {
+    if (!state.wakeLock) requestWakeLock();
+    if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
+    state.watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
+      enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
+    });
+  }
 });
 
 // ---------- waypoints ----------
