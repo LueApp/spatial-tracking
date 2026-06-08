@@ -76,6 +76,17 @@
       <div id="lockHint" class="lock-hint hidden">🔒 Keep screen unlocked — locking pauses trail recording</div>
     </section>
 
+    <!-- TRAJECTORY RECORD PICKER -->
+    <section class="card">
+      <label for="recordSelect" class="lbl">Trajectory record</label>
+      <select id="recordSelect"></select>
+      <div class="record-actions">
+        <button id="newRecordBtn" class="ghost">New</button>
+        <button id="renameRecordBtn" class="ghost">Rename</button>
+        <button id="deleteRecordBtn" class="ghost">Delete</button>
+      </div>
+    </section>
+
     <!-- TARGET PICKER -->
     <section class="card">
       <label for="targetSelect" class="lbl">Navigate back to</label>
@@ -98,7 +109,8 @@
 
   <!-- CONTROL BAR -->
   <footer id="controls">
-    <button id="startBtn" class="primary">▶ Start</button>
+    <button id="startBtn" class="primary">● Rec</button>
+    <button id="findBtn" class="primary secondary">➤ Find</button>
     <button id="markBtn" class="accent" disabled>📍 Mark</button>
     <button id="stopBtn" class="danger" disabled>■ Stop</button>
     <button id="clearBtn" class="ghost">🗑 Clear</button>

@@ -1,7 +1,7 @@
 {
   "name": "Breadcrumb — Find Your Way Back",
   "short_name": "Breadcrumb",
-  "description": "Record your GPS trail and navigate back to the start or saved waypoints.",
+  "description": "Record GPS trails, load previous records, and navigate back to starts or saved waypoints.",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "portrait",

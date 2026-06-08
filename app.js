@@ -28,31 +28,119 @@ const RECORD_MIN_DIST = 5;     // meters: only store a breadcrumb if moved this 
 const RECORD_MIN_TIME = 8000;  // ms: ...or this long since last stored point
 const ARRIVE_RADIUS = 8;       // meters: "you are here"
 const GAP_WARN_MS = 60000;     // ms: gap this long means screen was probably locked
+const LS_KEY_V1 = 'breadcrumb.v1';
+const LS_KEY_V2 = 'breadcrumb.v2';
 
 const state = {
+  records: [],        // [{id,name,trail,waypoints,createdAt,updatedAt}]
+  activeRecordId: null,
   trail: [],          // [{lat,lon,alt,acc,t}]
   waypoints: [],      // [{id,name,lat,lon,alt,t}]
   current: null,      // latest fix
   heading: null,      // compass degrees from true north
   targetId: 'home',   // 'home' | waypoint id
+  pendingMode: null,  // 'recording' | 'finding'
+  lastMode: 'recording',
   watchId: null,
   wakeLock: null,
   tracking: false,
+  recording: false,
   lastStored: 0,
+  needsSegmentBreak: false,
   gapTimer: null,
 };
 
 // ---------- persistence ----------
-const LS_KEY = 'breadcrumb.v1';
-function save() {
-  localStorage.setItem(LS_KEY, JSON.stringify({ trail: state.trail, waypoints: state.waypoints }));
+function defaultRecordName(t = Date.now()) {
+  return 'Trail ' + new Date(t).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 }
+
+function makeRecord(name, data = {}) {
+  const now = Date.now();
+  const label = (name || data.name || defaultRecordName(data.createdAt || now)).trim();
+  return {
+    id: data.id || ('rec' + now + '-' + Math.random().toString(36).slice(2, 8)),
+    name: label || defaultRecordName(data.createdAt || now),
+    trail: Array.isArray(data.trail) ? data.trail : [],
+    waypoints: Array.isArray(data.waypoints) ? data.waypoints : [],
+    createdAt: data.createdAt || now,
+    updatedAt: data.updatedAt || now,
+  };
+}
+
+function normalizeRecord(r) {
+  const createdAt = Number.isFinite(r && r.createdAt) ? r.createdAt : Date.now();
+  return makeRecord(r && r.name, {
+    id: r && r.id,
+    trail: r && r.trail,
+    waypoints: r && r.waypoints,
+    createdAt,
+    updatedAt: Number.isFinite(r && r.updatedAt) ? r.updatedAt : createdAt,
+  });
+}
+
+function activeRecord() {
+  return state.records.find(r => r.id === state.activeRecordId) || null;
+}
+
+function ensureActiveRecord() {
+  let rec = activeRecord();
+  if (!rec) {
+    rec = makeRecord();
+    state.records.push(rec);
+    state.activeRecordId = rec.id;
+  }
+  state.trail = rec.trail;
+  state.waypoints = rec.waypoints;
+  return rec;
+}
+
+function touchActiveRecord() {
+  const rec = ensureActiveRecord();
+  rec.updatedAt = Date.now();
+}
+
+function save() {
+  localStorage.setItem(LS_KEY_V2, JSON.stringify({
+    records: state.records,
+    activeRecordId: state.activeRecordId,
+  }));
+}
+
 function load() {
   try {
-    const d = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-    state.trail = d.trail || [];
-    state.waypoints = d.waypoints || [];
+    const v2 = JSON.parse(localStorage.getItem(LS_KEY_V2) || '{}');
+    if (Array.isArray(v2.records) && v2.records.length) {
+      state.records = v2.records.map(normalizeRecord);
+      state.activeRecordId = state.records.some(r => r.id === v2.activeRecordId)
+        ? v2.activeRecordId
+        : state.records[0].id;
+      ensureActiveRecord();
+      return;
+    }
+  } catch { /* corrupt -> try legacy */ }
+
+  try {
+    const d = JSON.parse(localStorage.getItem(LS_KEY_V1) || '{}');
+    if ((Array.isArray(d.trail) && d.trail.length) ||
+        (Array.isArray(d.waypoints) && d.waypoints.length)) {
+      const rec = makeRecord('Imported trail', {
+        trail: d.trail || [],
+        waypoints: d.waypoints || [],
+        createdAt: (d.trail && d.trail[0] && d.trail[0].t) || Date.now(),
+      });
+      state.records = [rec];
+      state.activeRecordId = rec.id;
+      ensureActiveRecord();
+      save();
+      return;
+    }
   } catch { /* corrupt -> ignore */ }
+
+  ensureActiveRecord();
+  save();
 }
 
 // ---------- dom ----------
@@ -62,7 +150,9 @@ const els = {
   dist: $('distOut'), bear: $('bearOut'), altDiff: $('altDiffOut'),
   acc: $('accOut'), alt: $('altOut'), head: $('headOut'), ptCount: $('ptCountOut'),
   targetLabel: $('targetLabel'), targetSelect: $('targetSelect'),
-  start: $('startBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
+  recordSelect: $('recordSelect'),
+  newRecord: $('newRecordBtn'), renameRecord: $('renameRecordBtn'), deleteRecord: $('deleteRecordBtn'),
+  start: $('startBtn'), find: $('findBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
   map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'),
   wpList: $('wpList'), lockHint: $('lockHint'),
   errBanner: $('errBanner'), errTitle: $('errTitle'), errMsg: $('errMsg'),
@@ -100,13 +190,49 @@ function targetName() {
 }
 
 // ---------- tracking ----------
-async function start() {
+function statusText() {
+  return state.recording ? 'recording' : 'finding';
+}
+
+function syncControls() {
+  const active = state.tracking;
+  els.start.disabled = active;
+  els.find.disabled = active;
+  els.stop.disabled = !active;
+  els.mark.disabled = !state.recording;
+  els.recordSelect.disabled = state.recording;
+  els.newRecord.disabled = active;
+  els.renameRecord.disabled = active;
+  els.deleteRecord.disabled = active;
+  els.clear.disabled = active;
+  els.lockHint.classList.toggle('hidden', !state.recording);
+}
+
+function startWatch() {
+  if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
+  state.watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
+    enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
+  });
+}
+
+async function startRecording() {
+  await startLocation('recording');
+}
+
+async function startFinding() {
+  await startLocation('finding');
+}
+
+async function startLocation(mode) {
   if (!('geolocation' in navigator)) { setStatus('no GPS', 'error'); return; }
   if (!window.isSecureContext) {
     showErr('HTTPS required', 'This page must be served over HTTPS for GPS to work. See README.', false);
     return;
   }
+  if (state.tracking) return;
   hideErr();
+  state.pendingMode = mode;
+  state.lastMode = mode;
 
   // Check existing permission state.
   // If already granted: watchPosition fires silently — no dialog, overlay apps can't block it.
@@ -119,6 +245,7 @@ async function start() {
   } catch { /* API unsupported — assume prompt, fall through */ }
 
   if (permState === 'denied') {
+    state.pendingMode = null;
     showErr(
       'Location permanently blocked',
       'Permission was previously denied. To fix: open browser Settings → Site settings → Location → find this site → set to Allow, then reload.',
@@ -128,42 +255,47 @@ async function start() {
   }
 
   if (permState === 'prompt') {
-    // Show pre-flight modal — user clears overlays, then taps Continue which calls doStart()
+    // Show pre-flight modal — user clears overlays, then taps Continue which calls doStart().
     showPreflight();
     return;
   }
 
   // 'granted' — go directly, no dialog will appear, overlay apps don't matter
-  await doStart();
+  await doStart(mode);
 }
 
-async function doStart() {
+async function doStart(mode = state.pendingMode || 'recording') {
   hidePreflight();
   await requestCompass();   // iOS needs this from a tap
   await requestWakeLock();  // keep screen awake so tracking continues
 
+  ensureActiveRecord();
   state.tracking = true;
-  els.start.disabled = true;
-  els.stop.disabled = false;
-  els.mark.disabled = false;
-  els.lockHint.classList.remove('hidden');
+  state.recording = mode === 'recording';
+  state.lastMode = mode;
+  state.pendingMode = null;
+  if (state.recording) {
+    const last = state.trail[state.trail.length - 1];
+    state.lastStored = last ? last.t : 0;
+    state.needsSegmentBreak = state.trail.length > 0;
+  } else {
+    state.needsSegmentBreak = false;
+  }
+  syncControls();
   setStatus('locating…', 'tracking');
-
-  state.watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
-    enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
-  });
+  startWatch();
 }
 
 function stop() {
   if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
   state.watchId = null;
   state.tracking = false;
+  state.recording = false;
+  state.pendingMode = null;
+  state.needsSegmentBreak = false;
   clearTimeout(state.gapTimer);
   releaseWakeLock();
-  els.start.disabled = false;
-  els.stop.disabled = true;
-  els.mark.disabled = true;
-  els.lockHint.classList.add('hidden');
+  syncControls();
   setStatus('stopped', 'idle');
 }
 
@@ -176,27 +308,41 @@ function onFix(pos) {
   };
   state.current = fix;
 
-  // Detect screen-lock gap: if time jumped by >60s since last stored point, warn user
-  const gapMs = state.lastStored > 0 ? pos.timestamp - state.lastStored : 0;
-  if (gapMs > GAP_WARN_MS) {
-    const mins = Math.round(gapMs / 60000);
-    setStatus('gap ~' + mins + 'min (screen locked)', 'tracking');
-    clearTimeout(state.gapTimer);
-    state.gapTimer = setTimeout(() => { if (state.tracking) setStatus('tracking', 'tracking'); }, 5000);
-  } else {
-    setStatus('tracking', 'tracking');
+  if (!state.recording) {
+    setStatus('finding', 'tracking');
+    drawTrail();
+    render();
+    return;
   }
 
-  // first ever point becomes home
+  // First ever point becomes home. Gaps start a new segment so the map never
+  // draws a fake straight line across screen-lock or app-restart movement.
   const isFirst = state.trail.length === 0;
   const last = state.trail[state.trail.length - 1];
+  const gapMs = last ? pos.timestamp - last.t : 0;
+  const startsNewSegment = !isFirst && (state.needsSegmentBreak || gapMs > GAP_WARN_MS);
   const moved = last ? distance(last, fix) : Infinity;
-  const elapsed = pos.timestamp - state.lastStored;
+  const elapsed = last ? pos.timestamp - last.t : Infinity;
 
-  if (isFirst || moved >= RECORD_MIN_DIST || elapsed >= RECORD_MIN_TIME) {
+  if (gapMs > GAP_WARN_MS) {
+    const mins = Math.round(gapMs / 60000);
+    setStatus('gap ~' + mins + 'min (new segment)', 'tracking');
+    clearTimeout(state.gapTimer);
+    state.gapTimer = setTimeout(() => {
+      if (state.tracking) setStatus(statusText(), 'tracking');
+    }, 5000);
+  } else {
+    setStatus('recording', 'tracking');
+  }
+
+  if (isFirst || startsNewSegment || moved >= RECORD_MIN_DIST || elapsed >= RECORD_MIN_TIME) {
+    if (startsNewSegment) fix.breakBefore = true;
     state.trail.push(fix);
     state.lastStored = pos.timestamp;
+    state.needsSegmentBreak = false;
+    touchActiveRecord();
     save();
+    refreshRecordOptions();
     refreshTargetOptions();
     renderWaypointList();
     drawTrail();
@@ -282,16 +428,96 @@ async function requestWakeLock() {
 function releaseWakeLock() {
   if (state.wakeLock) { state.wakeLock.release().catch(() => {}); state.wakeLock = null; }
 }
-// Screen unlocked: re-acquire wake lock AND restart watchPosition (OS may have killed it)
+// Screen unlocked: re-acquire wake lock AND restart watchPosition (OS may have killed it).
 document.addEventListener('visibilitychange', () => {
+  if (state.recording && document.visibilityState === 'hidden') {
+    state.needsSegmentBreak = true;
+  }
   if (state.tracking && document.visibilityState === 'visible') {
     if (!state.wakeLock) requestWakeLock();
-    if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
-    state.watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
-      enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
-    });
+    startWatch();
   }
 });
+
+// ---------- trajectory records ----------
+function recordOptionLabel(rec) {
+  const pts = rec.trail.length;
+  const wp = rec.waypoints.length;
+  return rec.name + ' · ' + pts + ' pt' + (pts === 1 ? '' : 's') +
+    (wp ? ' · ' + wp + ' wp' : '');
+}
+
+function refreshRecordOptions() {
+  const sel = els.recordSelect;
+  const prev = state.activeRecordId;
+  sel.innerHTML = '';
+  for (const rec of state.records) {
+    const el = document.createElement('option');
+    el.value = rec.id;
+    el.textContent = recordOptionLabel(rec);
+    sel.appendChild(el);
+  }
+  if (state.records.some(r => r.id === prev)) sel.value = prev;
+}
+
+function selectRecord(id) {
+  if (state.recording) return;
+  const rec = state.records.find(r => r.id === id);
+  if (!rec) return;
+  state.activeRecordId = rec.id;
+  state.trail = rec.trail;
+  state.waypoints = rec.waypoints;
+  state.targetId = 'home';
+  state.lastStored = state.trail.length ? state.trail[state.trail.length - 1].t : 0;
+  state.needsSegmentBreak = false;
+  save();
+  refreshRecordOptions();
+  refreshTargetOptions();
+  renderWaypointList();
+  drawTrail();
+  render();
+}
+
+function createRecord() {
+  if (state.tracking) return;
+  const name = prompt('Name this trajectory:', defaultRecordName());
+  if (name === null) return;
+  const rec = makeRecord(name.trim() || defaultRecordName());
+  state.records.push(rec);
+  selectRecord(rec.id);
+}
+
+function renameRecord() {
+  if (state.tracking) return;
+  const rec = ensureActiveRecord();
+  const name = prompt('Rename trajectory:', rec.name);
+  if (name === null) return;
+  rec.name = name.trim() || rec.name;
+  rec.updatedAt = Date.now();
+  save();
+  refreshRecordOptions();
+}
+
+function deleteRecord() {
+  if (state.tracking) return;
+  const rec = ensureActiveRecord();
+  if (!confirm('Delete "' + rec.name + '"? This removes its trail and waypoints.')) return;
+  const idx = state.records.findIndex(r => r.id === rec.id);
+  state.records = state.records.filter(r => r.id !== rec.id);
+  if (!state.records.length) state.records.push(makeRecord());
+  const next = state.records[Math.max(0, Math.min(idx, state.records.length - 1))];
+  state.activeRecordId = next.id;
+  ensureActiveRecord();
+  state.targetId = 'home';
+  state.lastStored = state.trail.length ? state.trail[state.trail.length - 1].t : 0;
+  state.needsSegmentBreak = false;
+  save();
+  refreshRecordOptions();
+  refreshTargetOptions();
+  renderWaypointList();
+  drawTrail();
+  render();
+}
 
 // ---------- waypoints ----------
 function markWaypoint() {
@@ -304,16 +530,22 @@ function markWaypoint() {
     lat: state.current.lat, lon: state.current.lon,
     alt: state.current.alt, t: state.current.t,
   });
+  touchActiveRecord();
   save();
+  refreshRecordOptions();
   refreshTargetOptions();
   renderWaypointList();
   drawTrail();
 }
 
 function deleteWaypoint(id) {
-  state.waypoints = state.waypoints.filter(w => w.id !== id);
+  const rec = ensureActiveRecord();
+  rec.waypoints = state.waypoints.filter(w => w.id !== id);
+  state.waypoints = rec.waypoints;
   if (state.targetId === id) state.targetId = 'home';
+  touchActiveRecord();
   save();
+  refreshRecordOptions();
   refreshTargetOptions();
   renderWaypointList();
   drawTrail();
@@ -321,12 +553,17 @@ function deleteWaypoint(id) {
 }
 
 function clearAll() {
-  if (!confirm('Erase the whole trail and all waypoints? This cannot be undone.')) return;
-  state.trail = [];
-  state.waypoints = [];
+  if (state.tracking) return;
+  const rec = ensureActiveRecord();
+  if (!confirm('Erase "' + rec.name + '" trail and waypoints? The record stays in the list.')) return;
+  state.trail.length = 0;
+  state.waypoints.length = 0;
   state.targetId = 'home';
   state.lastStored = 0;
+  state.needsSegmentBreak = false;
+  touchActiveRecord();
   save();
+  refreshRecordOptions();
   refreshTargetOptions();
   renderWaypointList();
   drawTrail();
@@ -342,7 +579,10 @@ function fmtAlt(a) { return (a == null) ? 'n/a' : Math.round(a) + ' m'; }
 
 function render() {
   els.ptCount.textContent = state.trail.length;
-  els.targetLabel.innerHTML = 'Target: <b>' + targetName() + '</b>';
+  els.targetLabel.textContent = 'Target: ';
+  const targetText = document.createElement('b');
+  targetText.textContent = targetName();
+  els.targetLabel.appendChild(targetText);
 
   const cur = state.current, tgt = targetPoint();
   els.acc.textContent = cur ? Math.round(cur.acc) + ' m' : '—';
@@ -416,26 +656,59 @@ function renderWaypointList() {
 
   if (rows.length === 0) {
     const li = document.createElement('li');
-    li.innerHTML = '<span class="wp-sub">No trail yet. Tap Start to begin.</span>';
+    const empty = document.createElement('span');
+    empty.className = 'wp-sub';
+    empty.textContent = 'No trail yet. Tap Rec to begin.';
+    li.appendChild(empty);
     ul.appendChild(li);
     return;
   }
   for (const r of rows) {
     const li = document.createElement('li');
     const sub = r.lat.toFixed(5) + ', ' + r.lon.toFixed(5) + ' · ' + fmtAlt(r.alt);
-    li.innerHTML =
-      '<div style="flex:1">' +
-        '<div class="wp-name">' + r.name + '</div>' +
-        '<div class="wp-sub">' + sub + '</div>' +
-      '</div>' +
-      '<button class="wp-go" data-go="' + r.id + '">Go</button>' +
-      (r.fixed ? '' : '<button class="wp-del" data-del="' + r.id + '">✕</button>');
+    const main = document.createElement('div');
+    main.className = 'wp-main';
+    const name = document.createElement('div');
+    name.className = 'wp-name';
+    name.textContent = r.name;
+    const detail = document.createElement('div');
+    detail.className = 'wp-sub';
+    detail.textContent = sub;
+    const go = document.createElement('button');
+    go.className = 'wp-go';
+    go.setAttribute('data-go', r.id);
+    go.textContent = 'Go';
+    main.appendChild(name);
+    main.appendChild(detail);
+    li.appendChild(main);
+    li.appendChild(go);
+    if (!r.fixed) {
+      const del = document.createElement('button');
+      del.className = 'wp-del';
+      del.setAttribute('data-del', r.id);
+      del.textContent = '✕';
+      li.appendChild(del);
+    }
     ul.appendChild(li);
   }
 }
 
 // ---------- map (optional, Leaflet) ----------
-let map = null, trailLine = null, curMarker = null, wpLayer = null, mapReady = false;
+let map = null, trailLayer = null, curMarker = null, wpLayer = null, mapReady = false;
+
+function trailSegments() {
+  const segments = [];
+  let segment = [];
+  for (const p of state.trail) {
+    if (p.breakBefore && segment.length) {
+      segments.push(segment);
+      segment = [];
+    }
+    segment.push([p.lat, p.lon]);
+  }
+  if (segment.length) segments.push(segment);
+  return segments;
+}
 
 function ensureMap() {
   if (mapReady || typeof L === 'undefined') return;
@@ -443,7 +716,7 @@ function ensureMap() {
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '© OpenStreetMap',
   }).addTo(map);
-  trailLine = L.polyline([], { color: '#2ea0ff', weight: 4 }).addTo(map);
+  trailLayer = L.layerGroup().addTo(map);
   wpLayer = L.layerGroup().addTo(map);
   map.setView([0, 0], 2);
   mapReady = true;
@@ -452,17 +725,26 @@ function ensureMap() {
 function drawTrail() {
   if (!mapReady) return;
   const pts = state.trail.map(p => [p.lat, p.lon]);
-  trailLine.setLatLngs(pts);
+  trailLayer.clearLayers();
+  for (const segment of trailSegments()) {
+    if (segment.length > 1) {
+      L.polyline(segment, { color: '#2ea0ff', weight: 4 }).addTo(trailLayer);
+    }
+  }
   wpLayer.clearLayers();
   const h = home();
   if (h) L.marker([h.lat, h.lon]).addTo(wpLayer).bindPopup('Start');
-  for (const w of state.waypoints) L.marker([w.lat, w.lon]).addTo(wpLayer).bindPopup(w.name);
+  for (const w of state.waypoints) {
+    const popup = document.createElement('span');
+    popup.textContent = w.name;
+    L.marker([w.lat, w.lon]).addTo(wpLayer).bindPopup(popup);
+  }
   if (state.current) {
     const ll = [state.current.lat, state.current.lon];
     if (!curMarker) curMarker = L.circleMarker(ll, { radius: 7, color: '#36d399', fillColor: '#36d399', fillOpacity: 1 }).addTo(map);
     else curMarker.setLatLng(ll);
   }
-  if (pts.length) map.fitBounds(trailLine.getBounds().pad(0.3));
+  if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.3));
 }
 
 function toggleMap() {
@@ -486,10 +768,15 @@ function toggleMap() {
 
 // ---------- events ----------
 els.errDismiss.addEventListener('click', hideErr);
-els.errRetry.addEventListener('click', () => { hideErr(); start(); });
-els.preflightOk.addEventListener('click', doStart);
-els.preflightCancel.addEventListener('click', hidePreflight);
-els.start.addEventListener('click', () => { hideErr(); start(); });
+els.errRetry.addEventListener('click', () => { hideErr(); startLocation(state.pendingMode || state.lastMode); });
+els.preflightOk.addEventListener('click', () => doStart());
+els.preflightCancel.addEventListener('click', () => { state.pendingMode = null; hidePreflight(); });
+els.recordSelect.addEventListener('change', e => selectRecord(e.target.value));
+els.newRecord.addEventListener('click', createRecord);
+els.renameRecord.addEventListener('click', renameRecord);
+els.deleteRecord.addEventListener('click', deleteRecord);
+els.start.addEventListener('click', () => { hideErr(); startRecording(); });
+els.find.addEventListener('click', () => { hideErr(); startFinding(); });
 els.stop.addEventListener('click', stop);
 els.mark.addEventListener('click', markWaypoint);
 els.clear.addEventListener('click', clearAll);
@@ -504,9 +791,11 @@ els.wpList.addEventListener('click', e => {
 
 // ---------- boot ----------
 load();
+refreshRecordOptions();
 refreshTargetOptions();
 renderWaypointList();
 render();
+syncControls();
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
