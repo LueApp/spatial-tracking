@@ -233,6 +233,14 @@ async function requestCompass() {
   window.addEventListener('deviceorientation', onOrient, true);
 }
 
+// EMA smoothing on unit-vector components (handles 0°/360° wrap correctly:
+// averaging 359° and 1° must yield 0°, NOT 180° — so we average sin/cos, not degrees).
+// Lower HEADING_EMA = smoother but laggier. 0.15 ≈ ~7 samples to settle.
+const HEADING_EMA = 0.15;
+const HEADING_DEADBAND = 0.8; // °: skip render if smoothed change is below this
+let sumSin = 0, sumCos = 0, headingInit = false;
+let arrowAngle = 0; // accumulated arrow rotation in degrees (no wrap)
+
 function onOrient(e) {
   let h = null;
   if (typeof e.webkitCompassHeading === 'number') {
@@ -242,7 +250,23 @@ function onOrient(e) {
   } else if (typeof e.alpha === 'number') {
     h = (360 - e.alpha) % 360;             // fallback (may drift)
   }
-  if (h != null && !Number.isNaN(h)) state.heading = h;
+  if (h == null || Number.isNaN(h)) return;
+
+  const r = toRad(h), s = Math.sin(r), c = Math.cos(r);
+  if (!headingInit) { sumSin = s; sumCos = c; headingInit = true; }
+  else {
+    sumSin = sumSin * (1 - HEADING_EMA) + s * HEADING_EMA;
+    sumCos = sumCos * (1 - HEADING_EMA) + c * HEADING_EMA;
+  }
+  const smoothed = (toDeg(Math.atan2(sumSin, sumCos)) + 360) % 360;
+
+  // Deadband — small short-angle delta means jitter, ignore
+  if (state.heading != null) {
+    let d = Math.abs(smoothed - state.heading);
+    if (d > 180) d = 360 - d; // shortest angular distance
+    if (d < HEADING_DEADBAND) return;
+  }
+  state.heading = smoothed;
   render();
 }
 
@@ -340,7 +364,9 @@ function render() {
   els.altDiff.textContent = altD == null ? 'n/a'
     : (altD >= 0 ? '+' : '') + Math.round(altD) + ' m';
 
-  // rotate arrow: bearing relative to where phone points
+  // rotate arrow: bearing relative to where phone points.
+  // Accumulate continuous angle so CSS transition rotates the short way
+  // (raw "brg - heading" can jump 359°→0°, causing a full spin).
   const arrived = d <= ARRIVE_RADIUS;
   els.arrow.classList.toggle('on-target', arrived);
   if (arrived) {
@@ -349,14 +375,19 @@ function render() {
     els.noHeading.classList.add('hidden');
   } else {
     els.arrow.textContent = '↑';
+    let target;
     if (state.heading != null) {
-      els.arrow.style.transform = 'rotate(' + (brg - state.heading) + 'deg)';
+      target = brg - state.heading;
       els.noHeading.classList.add('hidden');
     } else {
-      // no compass: arrow can't be relative; show north-up bearing + hint
-      els.arrow.style.transform = 'rotate(' + brg + 'deg)';
+      target = brg;
       els.noHeading.classList.remove('hidden');
     }
+    // unwrap to nearest equivalent of last shown angle
+    const last = arrowAngle;
+    let diff = ((target - last + 540) % 360) - 180; // -180..180
+    arrowAngle = last + diff;
+    els.arrow.style.transform = 'rotate(' + arrowAngle + 'deg)';
   }
 }
 
