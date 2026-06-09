@@ -23,11 +23,49 @@ function bearing(a, b) { // initial bearing 0..360 from true north
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
+function accuracy(fix) {
+  return Number.isFinite(fix && fix.acc) ? fix.acc : null;
+}
+
+function isWeakFix(fix) {
+  const acc = accuracy(fix);
+  return acc != null && acc > GPS_MAX_ACCURACY;
+}
+
+function isWithinGpsNoise(prev, fix) {
+  if (!prev || !fix) return false;
+  const acc = Math.max(accuracy(prev) || 0, accuracy(fix) || 0);
+  return acc >= GPS_JITTER_MIN_ACC &&
+    distance(prev, fix) <= Math.max(RECORD_MIN_DIST, acc * GPS_JITTER_FACTOR);
+}
+
+function isLikelyGpsJump(prev, fix) {
+  if (!prev || !fix) return false;
+  const dt = (fix.t - prev.t) / 1000;
+  if (dt <= 0 || dt > GAP_WARN_MS / 1000) return false;
+  const acc = Math.max(accuracy(prev) || 0, accuracy(fix) || 0);
+  return acc >= GPS_JITTER_MIN_ACC && distance(prev, fix) / dt > GPS_JUMP_SPEED;
+}
+
+function smoothFix(prev, fix) {
+  if (!prev || fix.t - prev.t > GAP_WARN_MS || !isWithinGpsNoise(prev, fix)) return fix;
+  return {
+    ...fix,
+    lat: prev.lat + (fix.lat - prev.lat) * GPS_SMOOTH_ALPHA,
+    lon: prev.lon + (fix.lon - prev.lon) * GPS_SMOOTH_ALPHA,
+  };
+}
+
 // ---------- state ----------
 const RECORD_MIN_DIST = 5;     // meters: only store a breadcrumb if moved this far
 const RECORD_MIN_TIME = 8000;  // ms: ...or this long since last stored point
 const ARRIVE_RADIUS = 8;       // meters: "you are here"
 const GAP_WARN_MS = 60000;     // ms: gap this long means screen was probably locked
+const GPS_MAX_ACCURACY = 75;   // meters: worse fixes are usually indoor noise
+const GPS_JITTER_MIN_ACC = 20; // meters: apply noise filtering only to weak fixes
+const GPS_JITTER_FACTOR = 1.2; // ignore stored movement inside this accuracy radius
+const GPS_JUMP_SPEED = 8;      // m/s: likely not walking if accuracy is weak
+const GPS_SMOOTH_ALPHA = 0.25; // blend small noisy movements instead of jumping
 const LS_KEY_V1 = 'breadcrumb.v1';
 const LS_KEY_V2 = 'breadcrumb.v2';
 
@@ -301,11 +339,23 @@ function stop() {
 
 function onFix(pos) {
   const c = pos.coords;
-  const fix = {
+  let fix = {
     lat: c.latitude, lon: c.longitude,
     alt: c.altitude, acc: c.accuracy,
     altAcc: c.altitudeAccuracy, t: pos.timestamp,
   };
+  const prevCurrent = state.current;
+  if (isWeakFix(fix) && (prevCurrent || state.recording)) {
+    setStatus('weak GPS ~' + Math.round(fix.acc) + 'm', 'tracking');
+    render();
+    return;
+  }
+  if (isLikelyGpsJump(prevCurrent, fix)) {
+    setStatus('GPS jump ignored', 'tracking');
+    render();
+    return;
+  }
+  fix = smoothFix(prevCurrent, fix);
   state.current = fix;
 
   if (!state.recording) {
@@ -323,6 +373,7 @@ function onFix(pos) {
   const startsNewSegment = !isFirst && (state.needsSegmentBreak || gapMs > GAP_WARN_MS);
   const moved = last ? distance(last, fix) : Infinity;
   const elapsed = last ? pos.timestamp - last.t : Infinity;
+  const jitter = !isFirst && !startsNewSegment && isWithinGpsNoise(last, fix);
 
   if (gapMs > GAP_WARN_MS) {
     const mins = Math.round(gapMs / 60000);
@@ -335,7 +386,7 @@ function onFix(pos) {
     setStatus('recording', 'tracking');
   }
 
-  if (isFirst || startsNewSegment || moved >= RECORD_MIN_DIST || elapsed >= RECORD_MIN_TIME) {
+  if (isFirst || startsNewSegment || (!jitter && (moved >= RECORD_MIN_DIST || elapsed >= RECORD_MIN_TIME))) {
     if (startsNewSegment) fix.breakBefore = true;
     state.trail.push(fix);
     state.lastStored = pos.timestamp;
@@ -519,6 +570,12 @@ function deleteRecord() {
   render();
 }
 
+function setTarget(id) {
+  state.targetId = id;
+  render();
+  drawTrail();
+}
+
 // ---------- waypoints ----------
 function markWaypoint() {
   if (!state.current) { alert('No GPS fix yet. Wait for tracking to lock on.'); return; }
@@ -579,7 +636,7 @@ function fmtAlt(a) { return (a == null) ? 'n/a' : Math.round(a) + ' m'; }
 
 function render() {
   els.ptCount.textContent = state.trail.length;
-  els.targetLabel.textContent = 'Target: ';
+  els.targetLabel.textContent = 'Direct target: ';
   const targetText = document.createElement('b');
   targetText.textContent = targetName();
   els.targetLabel.appendChild(targetText);
@@ -694,7 +751,7 @@ function renderWaypointList() {
 }
 
 // ---------- map (optional, Leaflet) ----------
-let map = null, trailLayer = null, curMarker = null, wpLayer = null, mapReady = false;
+let map = null, trailLayer = null, targetLayer = null, curMarker = null, wpLayer = null, mapReady = false;
 
 function trailSegments() {
   const segments = [];
@@ -718,6 +775,7 @@ function ensureMap() {
   }).addTo(map);
   trailLayer = L.layerGroup().addTo(map);
   wpLayer = L.layerGroup().addTo(map);
+  targetLayer = L.layerGroup().addTo(map);
   map.setView([0, 0], 2);
   mapReady = true;
 }
@@ -725,6 +783,7 @@ function ensureMap() {
 function drawTrail() {
   if (!mapReady) return;
   const pts = state.trail.map(p => [p.lat, p.lon]);
+  const fitPts = pts.slice();
   trailLayer.clearLayers();
   for (const segment of trailSegments()) {
     if (segment.length > 1) {
@@ -739,12 +798,37 @@ function drawTrail() {
     popup.textContent = w.name;
     L.marker([w.lat, w.lon]).addTo(wpLayer).bindPopup(popup);
   }
+  targetLayer.clearLayers();
+  const tgt = targetPoint();
+  if (tgt) {
+    const targetPopup = document.createElement('span');
+    targetPopup.textContent = 'Target: ' + targetName();
+    L.circleMarker([tgt.lat, tgt.lon], {
+      radius: 10,
+      color: '#ffb020',
+      weight: 3,
+      fillColor: '#ffb020',
+      fillOpacity: 0.35,
+    }).addTo(targetLayer).bindPopup(targetPopup);
+    fitPts.push([tgt.lat, tgt.lon]);
+    if (state.current) {
+      L.polyline([
+        [state.current.lat, state.current.lon],
+        [tgt.lat, tgt.lon],
+      ], {
+        color: '#ffb020',
+        weight: 2,
+        dashArray: '6 8',
+      }).addTo(targetLayer);
+    }
+  }
   if (state.current) {
     const ll = [state.current.lat, state.current.lon];
     if (!curMarker) curMarker = L.circleMarker(ll, { radius: 7, color: '#36d399', fillColor: '#36d399', fillOpacity: 1 }).addTo(map);
     else curMarker.setLatLng(ll);
+    fitPts.push(ll);
   }
-  if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.3));
+  if (fitPts.length) map.fitBounds(L.latLngBounds(fitPts).pad(0.3));
 }
 
 function toggleMap() {
@@ -781,11 +865,11 @@ els.stop.addEventListener('click', stop);
 els.mark.addEventListener('click', markWaypoint);
 els.clear.addEventListener('click', clearAll);
 els.mapToggle.addEventListener('click', toggleMap);
-els.targetSelect.addEventListener('change', e => { state.targetId = e.target.value; render(); });
+els.targetSelect.addEventListener('change', e => setTarget(e.target.value));
 els.wpList.addEventListener('click', e => {
   const go = e.target.getAttribute('data-go');
   const del = e.target.getAttribute('data-del');
-  if (go) { state.targetId = go; els.targetSelect.value = go; render(); }
+  if (go) { els.targetSelect.value = go; setTarget(go); }
   if (del) deleteWaypoint(del);
 });
 

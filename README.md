@@ -14,9 +14,10 @@ map. 100% client-side, no server, no account. Your trail is saved on your phone
   delete old ones, and switch back to a previous record later.
 - **➤ Find** — starts live GPS navigation without adding points to the selected
   record. Use this when you only want to follow an already saved path back.
-- **Navigate back** — pick *Start* or any waypoint; a big arrow points the way
-  (rotates with your phone's compass), showing distance, bearing and altitude
-  difference. Turns green ✓ when you arrive (≤ 8 m).
+- **Navigate back** — pick *Start* or any waypoint; a big arrow points the
+  straight-line direction to that target from your current GPS position. It
+  rotates with your phone's compass and shows distance, direct bearing and
+  altitude difference. Turns green ✓ when you arrive (≤ 8 m).
 - **Map** (optional) — draws your path on OpenStreetMap. Needs internet for the
   map tiles; the arrow works fully offline.
 - **■ Stop / 🗑 Clear** — stop GPS / erase the selected record's trail and
@@ -62,6 +63,9 @@ Then in your phone browser use **Add to Home Screen** to install it as an app
   tracking — keep it in the foreground for a complete trail.
 - If recording resumes after the screen was locked, the next GPS fix starts a
   new trail segment instead of drawing a straight line from the old point.
+- Weak indoor GPS fixes are filtered: very poor accuracy and suspicious jumps
+  are ignored, and noisy movement inside the reported accuracy radius is not
+  stored as a breadcrumb.
 - A breadcrumb is stored when you've moved ≥ 5 m or every ≥ 8 s (tunable at the
   top of `app.js`).
 
