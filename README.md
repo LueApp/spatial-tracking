@@ -21,8 +21,10 @@ map. 100% client-side, no server, no account. Your trail is saved on your phone
   held upright with the target ahead, the arrow tips "into" the screen. Shows
   distance, direct bearing and altitude difference. Turns green ✓ when you
   arrive (≤ 8 m).
-- **Map** (optional) — draws your path on OpenStreetMap. Needs internet for the
-  map tiles; the arrow works fully offline.
+- **Map** (optional) — sits right below the arrow in the same card and draws
+  your path on OpenStreetMap. A 🧭 toggle switches between north-up and
+  heading-up (the map auto-rotates to your compass heading, like car
+  navigation). Needs internet for the map tiles; the arrow works fully offline.
 - **■ Stop / 🗑 Clear** — stop GPS / erase the selected record's trail and
   waypoints. Use **Delete** to remove the whole selected record.
 

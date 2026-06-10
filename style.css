@@ -130,6 +130,8 @@ button.ghost:disabled {
   opacity: .4;
 }
 
+.map-actions { display: flex; gap: 8px; margin-top: 12px; }
+.map-actions button { flex: 1; width: auto; }
 #map { height: 280px; border-radius: 12px; margin-top: 10px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
 

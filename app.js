@@ -91,6 +91,7 @@ const PDR_ENTER_WEAK_FIXES = 2;    // consecutive unusable fixes to enter PDR
 const PDR_ENTER_SILENT_MS = 10000; // ...or no trusted fix for this long while fixes arrive
 const LS_KEY_V1 = 'breadcrumb.v1';
 const LS_KEY_V2 = 'breadcrumb.v2';
+const LS_KEY_MAPROT = 'breadcrumb.maprot';
 
 const state = {
   records: [],        // [{id,name,trail,waypoints,createdAt,updatedAt}]
@@ -110,6 +111,7 @@ const state = {
   lastStored: 0,
   needsSegmentBreak: false,
   gapTimer: null,
+  mapRotateMode: localStorage.getItem(LS_KEY_MAPROT) === '1', // heading-up map
   pdr: {              // pedestrian dead reckoning fallback
     active: false,
     weakStreak: 0,    // consecutive unusable GPS fixes
@@ -223,7 +225,7 @@ const els = {
   recordSelect: $('recordSelect'),
   newRecord: $('newRecordBtn'), renameRecord: $('renameRecordBtn'), deleteRecord: $('deleteRecordBtn'),
   start: $('startBtn'), find: $('findBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
-  map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'),
+  map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'), mapRotate: $('mapRotate'),
   wpList: $('wpList'), lockHint: $('lockHint'),
   errBanner: $('errBanner'), errTitle: $('errTitle'), errMsg: $('errMsg'),
   errSteps: $('errSteps'), errDismiss: $('errDismiss'), errRetry: $('errRetry'),
@@ -868,6 +870,7 @@ function fmtDist(m) {
 function fmtAlt(a) { return (a == null) ? 'n/a' : Math.round(a) + ' m'; }
 
 function render() {
+  updateMapRotation(); // heading may have changed; render is rAF-coalesced
   els.ptCount.textContent = state.trail.length;
   els.targetLabel.textContent = 'Direct target: ';
   const targetText = document.createElement('b');
@@ -998,7 +1001,9 @@ function trailSegments() {
 
 function ensureMap() {
   if (mapReady || typeof L === 'undefined') return;
-  map = L.map('map', { zoomControl: true });
+  // rotate/touchRotate come from leaflet-rotate; plain Leaflet ignores them.
+  // touchRotate stays off so the bearing is only ever set by the toggle below.
+  map = L.map('map', { zoomControl: true, rotate: true, touchRotate: false });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '© OpenStreetMap',
   }).addTo(map);
@@ -1073,12 +1078,44 @@ function toggleMap() {
       return;
     }
     ensureMap();
-    setTimeout(() => { map.invalidateSize(); drawTrail(); }, 50);
+    els.mapRotate.classList.toggle('hidden', !mapRotationSupported());
+    updateRotateButton();
+    setTimeout(() => { map.invalidateSize(); drawTrail(); updateMapRotation(true); }, 50);
   } else {
     els.map.classList.add('hidden');
     els.mapHint.classList.add('hidden');
+    els.mapRotate.classList.add('hidden');
     els.mapToggle.textContent = 'Show map ▾';
   }
+}
+
+// ---------- map rotation (heading-up mode, via leaflet-rotate) ----------
+function mapRotationSupported() {
+  return mapReady && typeof map.setBearing === 'function';
+}
+
+// leaflet-rotate's setBearing(theta) rotates content clockwise by theta, so
+// bringing the compass heading to the top of the map takes a negated angle.
+let lastMapBearing = 0;
+function updateMapRotation(force) {
+  if (!mapRotationSupported() || els.map.classList.contains('hidden')) return;
+  const want = (state.mapRotateMode && state.heading != null) ? -state.heading : 0;
+  let d = Math.abs(want - lastMapBearing);
+  if (d > 180) d = 360 - d;
+  if (!force && d < 2) return; // deadband: don't churn tiles on compass jitter
+  lastMapBearing = want;
+  map.setBearing(want);
+}
+
+function updateRotateButton() {
+  els.mapRotate.textContent = state.mapRotateMode ? '🧭 Heading-up' : '🧭 North-up';
+}
+
+function toggleMapRotate() {
+  state.mapRotateMode = !state.mapRotateMode;
+  localStorage.setItem(LS_KEY_MAPROT, state.mapRotateMode ? '1' : '0');
+  updateRotateButton();
+  updateMapRotation(true);
 }
 
 // ---------- events ----------
@@ -1096,6 +1133,7 @@ els.stop.addEventListener('click', stop);
 els.mark.addEventListener('click', markWaypoint);
 els.clear.addEventListener('click', clearAll);
 els.mapToggle.addEventListener('click', toggleMap);
+els.mapRotate.addEventListener('click', toggleMapRotate);
 els.targetSelect.addEventListener('change', e => setTarget(e.target.value));
 els.wpList.addEventListener('click', e => {
   const go = e.target.getAttribute('data-go');
