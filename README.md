@@ -14,10 +14,13 @@ map. 100% client-side, no server, no account. Your trail is saved on your phone
   delete old ones, and switch back to a previous record later.
 - **➤ Find** — starts live GPS navigation without adding points to the selected
   record. Use this when you only want to follow an already saved path back.
-- **Navigate back** — pick *Start* or any waypoint; a big arrow points the
+- **Navigate back** — pick *Start* or any waypoint; a big 3D arrow points the
   straight-line direction to that target from your current GPS position. It
-  rotates with your phone's compass and shows distance, direct bearing and
-  altitude difference. Turns green ✓ when you arrive (≤ 8 m).
+  uses the phone's full orientation (compass + tilt), so it keeps pointing at
+  the target whether you hold the phone flat, upright, or anywhere in between —
+  held upright with the target ahead, the arrow tips "into" the screen. Shows
+  distance, direct bearing and altitude difference. Turns green ✓ when you
+  arrive (≤ 8 m).
 - **Map** (optional) — draws your path on OpenStreetMap. Needs internet for the
   map tiles; the arrow works fully offline.
 - **■ Stop / 🗑 Clear** — stop GPS / erase the selected record's trail and

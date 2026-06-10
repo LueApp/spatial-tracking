@@ -99,6 +99,7 @@ const state = {
   waypoints: [],      // [{id,name,lat,lon,alt,t}]
   current: null,      // latest fix
   heading: null,      // compass degrees from true north
+  orient: null,       // {beta, gamma} device pitch/roll for the 3D arrow
   targetId: 'home',   // 'home' | waypoint id
   pendingMode: null,  // 'recording' | 'finding'
   lastMode: 'recording',
@@ -555,9 +556,7 @@ async function requestCompass() {
 // averaging 359° and 1° must yield 0°, NOT 180° — so we average sin/cos, not degrees).
 // Lower HEADING_EMA = smoother but laggier. 0.15 ≈ ~7 samples to settle.
 const HEADING_EMA = 0.15;
-const HEADING_DEADBAND = 0.8; // °: skip render if smoothed change is below this
 let sumSin = 0, sumCos = 0, headingInit = false;
-let arrowAngle = 0; // accumulated arrow rotation in degrees (no wrap)
 
 function onOrient(e) {
   let h = null;
@@ -570,22 +569,99 @@ function onOrient(e) {
   }
   if (h == null || Number.isNaN(h)) return;
 
+  // full pose for the 3D arrow (beta/gamma missing on some desktops)
+  state.orient = (typeof e.beta === 'number' && typeof e.gamma === 'number')
+    ? { beta: e.beta, gamma: e.gamma }
+    : null;
+
   const r = toRad(h), s = Math.sin(r), c = Math.cos(r);
   if (!headingInit) { sumSin = s; sumCos = c; headingInit = true; }
   else {
     sumSin = sumSin * (1 - HEADING_EMA) + s * HEADING_EMA;
     sumCos = sumCos * (1 - HEADING_EMA) + c * HEADING_EMA;
   }
-  const smoothed = (toDeg(Math.atan2(sumSin, sumCos)) + 360) % 360;
+  state.heading = (toDeg(Math.atan2(sumSin, sumCos)) + 360) % 360;
+  scheduleRender();
+}
 
-  // Deadband — small short-angle delta means jitter, ignore
-  if (state.heading != null) {
-    let d = Math.abs(smoothed - state.heading);
-    if (d > 180) d = 360 - d; // shortest angular distance
-    if (d < HEADING_DEADBAND) return;
+// Sensors fire at ~60 Hz; coalesce renders to one per animation frame.
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
+}
+
+// ---------- 3d arrow ----------
+// The arrow points at the target in real space whatever the phone's pose
+// (flat, upright, tilted). World frame is W3C earth: x East, y North, z Up;
+// device→earth is R = Rz(alpha)·Rx(beta)·Ry(gamma). We invert R to bring the
+// target direction into device space, undo screen rotation, and map to CSS
+// coords (x right, y down, z toward viewer). Yaw comes from the smoothed
+// compass heading: exact on Android (absolute alpha), approximate on iOS at
+// steep tilt (webkitCompassHeading is tilt-compensated, not a raw yaw).
+const ARROW_EMA = 0.3;      // smoothing on the 3D direction vector
+const ARROW_DEADBAND = 0.8; // °: skip the DOM write below this change
+
+function rotX(v, t) { const c = Math.cos(t), s = Math.sin(t); return [v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c]; }
+function rotY(v, t) { const c = Math.cos(t), s = Math.sin(t); return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c]; }
+function rotZ(v, t) { const c = Math.cos(t), s = Math.sin(t); return [v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2]]; }
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') {
+    return screen.orientation.angle;
   }
-  state.heading = smoothed;
-  render();
+  return typeof window.orientation === 'number' ? window.orientation : 0;
+}
+
+function targetVecOnScreen(brg) {
+  let v = [Math.sin(toRad(brg)), Math.cos(toRad(brg)), 0]; // horizontal, world frame
+  if (state.orient && state.heading != null) {
+    v = rotZ(v, -toRad((360 - state.heading) % 360)); // undo yaw (alpha)
+    v = rotX(v, -toRad(state.orient.beta));           // undo pitch
+    v = rotY(v, -toRad(state.orient.gamma));          // undo roll
+    v = rotZ(v, -toRad(screenAngle()));               // device → screen frame
+  } else if (state.heading != null) {
+    const a = toRad(brg - state.heading);             // 2D fallback: flat-phone math
+    v = [Math.sin(a), Math.cos(a), 0];
+  }
+  return [v[0], -v[1], v[2]]; // world/device y up → CSS y down
+}
+
+let arrowVec = null;   // smoothed direction, CSS coords
+let arrowShown = null; // last vector written to the DOM
+
+function applyArrowVector(v) {
+  let n = Math.hypot(v[0], v[1], v[2]);
+  if (!n) return;
+  v = [v[0] / n, v[1] / n, v[2] / n];
+  if (!arrowVec) {
+    arrowVec = v;
+  } else if (arrowVec[0] * v[0] + arrowVec[1] * v[1] + arrowVec[2] * v[2] < -0.9) {
+    arrowVec = v; // near-opposite: EMA would collapse through zero, snap instead
+  } else {
+    arrowVec = [
+      arrowVec[0] + (v[0] - arrowVec[0]) * ARROW_EMA,
+      arrowVec[1] + (v[1] - arrowVec[1]) * ARROW_EMA,
+      arrowVec[2] + (v[2] - arrowVec[2]) * ARROW_EMA,
+    ];
+    n = Math.hypot(arrowVec[0], arrowVec[1], arrowVec[2]) || 1;
+    arrowVec = [arrowVec[0] / n, arrowVec[1] / n, arrowVec[2] / n];
+  }
+
+  if (arrowShown) {
+    const dot = arrowShown[0] * arrowVec[0] + arrowShown[1] * arrowVec[1] + arrowShown[2] * arrowVec[2];
+    if (dot > Math.cos(toRad(ARROW_DEADBAND))) return;
+  }
+  arrowShown = arrowVec;
+
+  // rotation taking the arrow's rest direction (up the screen: 0,-1,0) to arrowVec,
+  // via axis-angle: axis = cross((0,-1,0), v), cos = dot((0,-1,0), v)
+  const ax = -arrowVec[2], az = arrowVec[0];
+  const s = Math.hypot(ax, az), c = -arrowVec[1];
+  els.arrow.style.transform = s < 1e-4
+    ? (c > 0 ? 'none' : 'rotate3d(0,0,1,180deg)')
+    : 'rotate3d(' + ax.toFixed(4) + ',0,' + az.toFixed(4) + ',' + Math.atan2(s, c).toFixed(4) + 'rad)';
 }
 
 // ---------- motion (step detection for PDR) ----------
@@ -807,7 +883,7 @@ function render() {
 
   if (!cur || !tgt) {
     els.dist.textContent = '—'; els.bear.textContent = '—'; els.altDiff.textContent = '—';
-    els.arrow.style.transform = 'rotate(0deg)';
+    els.arrow.style.transform = 'none';
     return;
   }
 
@@ -820,30 +896,17 @@ function render() {
   els.altDiff.textContent = altD == null ? 'n/a'
     : (altD >= 0 ? '+' : '') + Math.round(altD) + ' m';
 
-  // rotate arrow: bearing relative to where phone points.
-  // Accumulate continuous angle so CSS transition rotates the short way
-  // (raw "brg - heading" can jump 359°→0°, causing a full spin).
+  // Orient the 3D arrow at the target in real space. The browser interpolates
+  // between rotate3d transforms via quaternion slerp, so 359°→0° takes the
+  // short way without manual unwrapping.
   const arrived = d <= ARRIVE_RADIUS;
   els.arrow.classList.toggle('on-target', arrived);
   if (arrived) {
-    els.arrow.textContent = '✓';
-    els.arrow.style.transform = 'rotate(0deg)';
+    els.arrow.style.transform = 'none';
     els.noHeading.classList.add('hidden');
   } else {
-    els.arrow.textContent = '↑';
-    let target;
-    if (state.heading != null) {
-      target = brg - state.heading;
-      els.noHeading.classList.add('hidden');
-    } else {
-      target = brg;
-      els.noHeading.classList.remove('hidden');
-    }
-    // unwrap to nearest equivalent of last shown angle
-    const last = arrowAngle;
-    let diff = ((target - last + 540) % 360) - 180; // -180..180
-    arrowAngle = last + diff;
-    els.arrow.style.transform = 'rotate(' + arrowAngle + 'deg)';
+    els.noHeading.classList.toggle('hidden', state.heading != null);
+    applyArrowVector(targetVecOnScreen(brg));
   }
 }
 
