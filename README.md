@@ -66,6 +66,15 @@ Then in your phone browser use **Add to Home Screen** to install it as an app
 - Weak indoor GPS fixes are filtered: very poor accuracy and suspicious jumps
   are ignored, and noisy movement inside the reported accuracy radius is not
   stored as a breadcrumb.
+- **Indoor fallback (PDR).** When GPS degrades (shopping mall, parking garage),
+  the app switches to pedestrian dead reckoning: it counts your steps with the
+  accelerometer and advances the position along the compass heading (~0.7 m per
+  step). Status shows `indoor PDR · N steps`, accuracy shows `≈X m (PDR)` and
+  grows with distance walked, and estimated trail segments are drawn dashed on
+  the map. As soon as a good GPS fix (≤ 35 m) returns, it snaps back to GPS.
+  PDR drifts a few percent of distance walked — treat long indoor stretches as
+  approximate. (True visual-inertial odometry isn't available to web pages;
+  it would need a native ARCore/ARKit app or a WebXR AR session.)
 - A breadcrumb is stored when you've moved ≥ 5 m or every ≥ 8 s (tunable at the
   top of `app.js`).
 

@@ -23,6 +23,17 @@ function bearing(a, b) { // initial bearing 0..360 from true north
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
+function destination(from, brg, dist) { // point dist meters from {lat,lon} along bearing
+  const d = dist / R, t = toRad(brg);
+  const p1 = toRad(from.lat), l1 = toRad(from.lon);
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(t));
+  const l2 = l1 + Math.atan2(
+    Math.sin(t) * Math.sin(d) * Math.cos(p1),
+    Math.cos(d) - Math.sin(p1) * Math.sin(p2)
+  );
+  return { lat: toDeg(p2), lon: ((toDeg(l2) + 540) % 360) - 180 };
+}
+
 function accuracy(fix) {
   return Number.isFinite(fix && fix.acc) ? fix.acc : null;
 }
@@ -66,6 +77,18 @@ const GPS_JITTER_MIN_ACC = 20; // meters: apply noise filtering only to weak fix
 const GPS_JITTER_FACTOR = 1.2; // ignore stored movement inside this accuracy radius
 const GPS_JUMP_SPEED = 8;      // m/s: likely not walking if accuracy is weak
 const GPS_SMOOTH_ALPHA = 0.25; // blend small noisy movements instead of jumping
+const GPS_GOOD_ACCURACY = 35;  // meters: a fix this good ends PDR fallback
+
+// PDR (pedestrian dead reckoning) — indoor fallback when GPS degrades.
+// Steps are detected from the accelerometer, heading comes from the compass,
+// and the position estimate advances PDR_STEP_LENGTH per step from the last
+// trusted fix. Error grows with distance walked, so the shown accuracy does too.
+const PDR_STEP_LENGTH = 0.7;       // meters per detected step (avg adult walk)
+const PDR_STEP_MIN_MS = 300;       // min ms between steps (caps cadence at ~3.3 Hz)
+const PDR_ACC_THRESHOLD = 1.2;     // m/s² above gravity baseline that counts as a step peak
+const PDR_DRIFT_RATE = 0.15;       // estimated error growth per meter walked
+const PDR_ENTER_WEAK_FIXES = 2;    // consecutive unusable fixes to enter PDR
+const PDR_ENTER_SILENT_MS = 10000; // ...or no trusted fix for this long while fixes arrive
 const LS_KEY_V1 = 'breadcrumb.v1';
 const LS_KEY_V2 = 'breadcrumb.v2';
 
@@ -86,6 +109,14 @@ const state = {
   lastStored: 0,
   needsSegmentBreak: false,
   gapTimer: null,
+  pdr: {              // pedestrian dead reckoning fallback
+    active: false,
+    weakStreak: 0,    // consecutive unusable GPS fixes
+    lastFixTime: 0,   // timestamp of last trusted GPS fix
+    steps: 0,
+    walked: 0,        // meters dead-reckoned since GPS was lost
+    baseAcc: 0,       // accuracy of the fix we started reckoning from
+  },
 };
 
 // ---------- persistence ----------
@@ -229,6 +260,7 @@ function targetName() {
 
 // ---------- tracking ----------
 function statusText() {
+  if (state.pdr.active) return 'indoor PDR · ' + state.pdr.steps + ' steps';
   return state.recording ? 'recording' : 'finding';
 }
 
@@ -305,6 +337,7 @@ async function startLocation(mode) {
 async function doStart(mode = state.pendingMode || 'recording') {
   hidePreflight();
   await requestCompass();   // iOS needs this from a tap
+  await requestMotion();    // accelerometer for indoor step counting (PDR)
   await requestWakeLock();  // keep screen awake so tracking continues
 
   ensureActiveRecord();
@@ -331,7 +364,11 @@ function stop() {
   state.recording = false;
   state.pendingMode = null;
   state.needsSegmentBreak = false;
+  state.pdr.active = false;
+  state.pdr.weakStreak = 0;
+  state.pdr.lastFixTime = 0;
   clearTimeout(state.gapTimer);
+  stopMotion();
   releaseWakeLock();
   syncControls();
   setStatus('stopped', 'idle');
@@ -346,16 +383,30 @@ function onFix(pos) {
   };
   const prevCurrent = state.current;
   if (isWeakFix(fix) && (prevCurrent || state.recording)) {
-    setStatus('weak GPS ~' + Math.round(fix.acc) + 'm', 'tracking');
+    noteUnusableFix('weak GPS ~' + Math.round(fix.acc) + 'm');
     render();
     return;
   }
-  if (isLikelyGpsJump(prevCurrent, fix)) {
-    setStatus('GPS jump ignored', 'tracking');
-    render();
-    return;
+  if (state.pdr.active) {
+    // While dead reckoning, only a clearly good fix may take over — a mediocre
+    // one indoors is often worse than the step-counted estimate.
+    const acc = accuracy(fix);
+    if (acc == null || acc > GPS_GOOD_ACCURACY) {
+      noteUnusableFix(null);
+      render();
+      return;
+    }
+    exitDeadReckoning(); // snap back to GPS; skip jump/smooth checks vs the estimate
+  } else {
+    if (isLikelyGpsJump(prevCurrent, fix)) {
+      noteUnusableFix('GPS jump ignored');
+      render();
+      return;
+    }
+    fix = smoothFix(prevCurrent, fix);
   }
-  fix = smoothFix(prevCurrent, fix);
+  state.pdr.weakStreak = 0;
+  state.pdr.lastFixTime = pos.timestamp;
   state.current = fix;
 
   if (!state.recording) {
@@ -365,16 +416,8 @@ function onFix(pos) {
     return;
   }
 
-  // First ever point becomes home. Gaps start a new segment so the map never
-  // draws a fake straight line across screen-lock or app-restart movement.
-  const isFirst = state.trail.length === 0;
   const last = state.trail[state.trail.length - 1];
   const gapMs = last ? pos.timestamp - last.t : 0;
-  const startsNewSegment = !isFirst && (state.needsSegmentBreak || gapMs > GAP_WARN_MS);
-  const moved = last ? distance(last, fix) : Infinity;
-  const elapsed = last ? pos.timestamp - last.t : Infinity;
-  const jitter = !isFirst && !startsNewSegment && isWithinGpsNoise(last, fix);
-
   if (gapMs > GAP_WARN_MS) {
     const mins = Math.round(gapMs / 60000);
     setStatus('gap ~' + mins + 'min (new segment)', 'tracking');
@@ -386,10 +429,28 @@ function onFix(pos) {
     setStatus('recording', 'tracking');
   }
 
+  recordFix(fix);
+  render();
+}
+
+// First ever point becomes home. Gaps start a new segment so the map never
+// draws a fake straight line across screen-lock or app-restart movement.
+function recordFix(fix) {
+  const isFirst = state.trail.length === 0;
+  const last = state.trail[state.trail.length - 1];
+  const gapMs = last ? fix.t - last.t : 0;
+  const startsNewSegment = !isFirst && (state.needsSegmentBreak || gapMs > GAP_WARN_MS);
+  const moved = last ? distance(last, fix) : Infinity;
+  const elapsed = last ? fix.t - last.t : Infinity;
+  // PDR steps are deliberate motion, never GPS noise — skip the jitter filter
+  // around estimated points (their inflated accuracy would swallow real moves)
+  const jitter = !isFirst && !startsNewSegment && !fix.est && !(last && last.est) &&
+    isWithinGpsNoise(last, fix);
+
   if (isFirst || startsNewSegment || (!jitter && (moved >= RECORD_MIN_DIST || elapsed >= RECORD_MIN_TIME))) {
     if (startsNewSegment) fix.breakBefore = true;
     state.trail.push(fix);
-    state.lastStored = pos.timestamp;
+    state.lastStored = fix.t;
     state.needsSegmentBreak = false;
     touchActiveRecord();
     save();
@@ -398,11 +459,71 @@ function onFix(pos) {
     renderWaypointList();
     drawTrail();
   }
+}
+
+// ---------- PDR (indoor dead-reckoning fallback) ----------
+function noteUnusableFix(msg) {
+  state.pdr.weakStreak++;
+  maybeEnterDeadReckoning();
+  if (state.pdr.active) setStatus(statusText(), 'tracking');
+  else if (msg) setStatus(msg, 'tracking');
+}
+
+function maybeEnterDeadReckoning() {
+  if (state.pdr.active || !state.tracking || !state.current) return;
+  const silent = state.pdr.lastFixTime &&
+    Date.now() - state.pdr.lastFixTime > PDR_ENTER_SILENT_MS;
+  if (state.pdr.weakStreak >= PDR_ENTER_WEAK_FIXES || silent) enterDeadReckoning();
+}
+
+function enterDeadReckoning() {
+  if (state.pdr.active || !state.current) return;
+  state.pdr.active = true;
+  state.pdr.steps = 0;
+  state.pdr.walked = 0;
+  state.pdr.baseAcc = accuracy(state.current) || GPS_GOOD_ACCURACY;
+  setStatus('GPS lost — indoor PDR', 'tracking');
+}
+
+function exitDeadReckoning() {
+  state.pdr.active = false;
+  state.pdr.weakStreak = 0;
+}
+
+function onStep() {
+  if (!state.pdr.active || !state.tracking || !state.current) return;
+  state.pdr.steps++;
+  if (state.heading == null) { // can't reckon without a compass heading
+    setStatus(statusText(), 'tracking');
+    return;
+  }
+  state.pdr.walked += PDR_STEP_LENGTH;
+  const next = destination(state.current, state.heading, PDR_STEP_LENGTH);
+  const fix = {
+    lat: next.lat, lon: next.lon,
+    alt: state.current.alt,
+    acc: Math.round(state.pdr.baseAcc + state.pdr.walked * PDR_DRIFT_RATE),
+    t: Date.now(),
+    est: true, // estimated, not a GPS fix
+  };
+  state.current = fix;
+  if (state.recording) recordFix(fix);
+  setStatus(statusText(), 'tracking');
+  drawTrail();
   render();
 }
 
 function onGeoError(err) {
   console.warn('geo error', err);
+  // Indoors GPS often times out or drops entirely. If we already have a
+  // position, switch to step-counting instead of killing the session, and
+  // keep the watch alive so a good outdoor fix can take over again.
+  if (state.tracking && state.current && (err.code === 2 || err.code === 3)) {
+    enterDeadReckoning();
+    startWatch();
+    render();
+    return;
+  }
   stop(); // reset UI — don't leave buttons stuck in tracking state
   if (err.code === 1) {
     showErr(
@@ -465,6 +586,42 @@ function onOrient(e) {
   }
   state.heading = smoothed;
   render();
+}
+
+// ---------- motion (step detection for PDR) ----------
+async function requestMotion() {
+  try {
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
+      const res = await DeviceMotionEvent.requestPermission(); // iOS 13+
+      if (res !== 'granted') return;
+    }
+  } catch { return; }
+  window.addEventListener('devicemotion', onMotion, true);
+}
+function stopMotion() {
+  window.removeEventListener('devicemotion', onMotion, true);
+  gravEma = null;
+  wasAbove = false;
+}
+
+// A step shows up as a spike of |acceleration| above the gravity baseline.
+// The baseline is a slow EMA (adapts to sensor bias / phone angle); a step is
+// counted on the rising edge of the spike, rate-limited to human cadence.
+let gravEma = null, lastStepT = 0, wasAbove = false;
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x == null) return;
+  const mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  gravEma = gravEma == null ? mag : gravEma * 0.96 + mag * 0.04;
+  const above = mag - gravEma > PDR_ACC_THRESHOLD;
+  const t = e.timeStamp || Date.now();
+  if (above && !wasAbove && t - lastStepT >= PDR_STEP_MIN_MS) {
+    lastStepT = t;
+    onStep();
+  }
+  wasAbove = above;
 }
 
 // ---------- wake lock ----------
@@ -642,7 +799,9 @@ function render() {
   els.targetLabel.appendChild(targetText);
 
   const cur = state.current, tgt = targetPoint();
-  els.acc.textContent = cur ? Math.round(cur.acc) + ' m' : '—';
+  els.acc.textContent = !cur ? '—'
+    : cur.est ? '≈' + Math.round(cur.acc) + ' m (PDR)'
+    : Math.round(cur.acc) + ' m';
   els.alt.textContent = cur ? fmtAlt(cur.alt) : '—';
   els.head.textContent = state.heading != null ? Math.round(state.heading) + '°' : '—';
 
@@ -754,17 +913,24 @@ function renderWaypointList() {
 let map = null, trailLayer = null, targetLayer = null, curMarker = null, wpLayer = null, mapReady = false;
 
 function trailSegments() {
+  // Split on explicit breaks, and also split runs of estimated (PDR) points so
+  // the map can draw them dashed. GPS→PDR transitions share the boundary point
+  // to stay visually connected.
   const segments = [];
-  let segment = [];
+  let seg = null;
   for (const p of state.trail) {
-    if (p.breakBefore && segment.length) {
-      segments.push(segment);
-      segment = [];
+    const est = !!p.est;
+    if (!seg || p.breakBefore) {
+      seg = { est, pts: [] };
+      segments.push(seg);
+    } else if (seg.est !== est) {
+      const lastPt = seg.pts[seg.pts.length - 1];
+      seg = { est, pts: lastPt ? [lastPt] : [] };
+      segments.push(seg);
     }
-    segment.push([p.lat, p.lon]);
+    seg.pts.push([p.lat, p.lon]);
   }
-  if (segment.length) segments.push(segment);
-  return segments;
+  return segments.filter(s => s.pts.length);
 }
 
 function ensureMap() {
@@ -786,8 +952,10 @@ function drawTrail() {
   const fitPts = pts.slice();
   trailLayer.clearLayers();
   for (const segment of trailSegments()) {
-    if (segment.length > 1) {
-      L.polyline(segment, { color: '#2ea0ff', weight: 4 }).addTo(trailLayer);
+    if (segment.pts.length > 1) {
+      L.polyline(segment.pts, segment.est
+        ? { color: '#b07cff', weight: 3, dashArray: '4 6' } // dead-reckoned (estimated)
+        : { color: '#2ea0ff', weight: 4 }).addTo(trailLayer);
     }
   }
   wpLayer.clearLayers();
