@@ -1,5 +1,5 @@
 /* Offline cache for the app shell. Map tiles are NOT cached (need internet). */
-const CACHE = 'breadcrumb-v6';
+const CACHE = 'breadcrumb-v7';
 const ASSETS = [
   './',
   './index.html',

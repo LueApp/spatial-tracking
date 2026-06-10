@@ -1096,15 +1096,39 @@ function mapRotationSupported() {
 
 // leaflet-rotate's setBearing(theta) rotates content clockwise by theta, so
 // bringing the compass heading to the top of the map takes a negated angle.
-let lastMapBearing = 0;
+// setBearing has no animation of its own — calling it directly on each heading
+// change makes the map snap in small discrete steps (visible jitter). Instead
+// the shown bearing chases the target exponentially, and the target itself
+// ignores changes below a deadband so idle compass wander never moves the map.
+const MAP_ROT_DEADBAND = 2.5; // °: heading must move this far to start rotating
+const MAP_ROT_RATE = 0.12;    // per-frame approach toward the target bearing
+const MAP_ROT_SETTLE = 0.05;  // °: consider the animation settled below this
+let mapBearingTarget = 0, mapBearingShown = 0, mapRotAnimId = null;
+
+function shortestAngle(deg) {
+  return ((deg + 540) % 360) - 180; // -180..180
+}
+
 function updateMapRotation(force) {
   if (!mapRotationSupported() || els.map.classList.contains('hidden')) return;
   const want = (state.mapRotateMode && state.heading != null) ? -state.heading : 0;
-  let d = Math.abs(want - lastMapBearing);
-  if (d > 180) d = 360 - d;
-  if (!force && d < 2) return; // deadband: don't churn tiles on compass jitter
-  lastMapBearing = want;
-  map.setBearing(want);
+  if (!force && Math.abs(shortestAngle(want - mapBearingShown)) < MAP_ROT_DEADBAND) return;
+  mapBearingTarget = want;
+  if (mapRotAnimId == null) mapRotAnimId = requestAnimationFrame(stepMapRotation);
+}
+
+function stepMapRotation() {
+  mapRotAnimId = null;
+  if (!mapRotationSupported() || els.map.classList.contains('hidden')) return;
+  const d = shortestAngle(mapBearingTarget - mapBearingShown);
+  if (Math.abs(d) <= MAP_ROT_SETTLE) {
+    mapBearingShown = mapBearingTarget;
+    map.setBearing(mapBearingShown);
+    return; // settled — restarts when updateMapRotation moves the target
+  }
+  mapBearingShown = (mapBearingShown + d * MAP_ROT_RATE + 360) % 360;
+  map.setBearing(mapBearingShown);
+  mapRotAnimId = requestAnimationFrame(stepMapRotation);
 }
 
 function updateRotateButton() {
