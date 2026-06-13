@@ -60,7 +60,12 @@ Then in your phone browser use **Add to Home Screen** to install it as an app
 ## Notes & limits
 
 - **Altitude** comes from the phone's GPS and is often missing or off by tens of
-  meters — treat it as best-effort. Shows `n/a` when unavailable.
+  meters — treat it as best-effort. Shows `n/a` when unavailable. Readings with
+  poor vertical accuracy are rejected and the rest smoothed; the readout shows
+  the uncertainty (`412 m ±8`). Indoors GPS altitude stops updating, so after
+  ~30 s without a fresh reading it is flagged `(old)` — elevator or stair
+  height changes are invisible to GPS, and browsers expose no barometer to
+  measure them.
 - **iOS** asks for compass (motion) permission on the first Rec or Find tap —
   allow it.
 - **Background tracking is limited.** Mobile browsers pause GPS when the screen

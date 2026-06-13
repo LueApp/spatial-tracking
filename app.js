@@ -67,6 +67,29 @@ function smoothFix(prev, fix) {
   };
 }
 
+// Altitude analog of smoothFix. GPS vertical error is 2-3x horizontal and is
+// reported separately (altitudeAccuracy), so altitude gets its own gate + EMA:
+// a reading less certain than ALT_MAX_ACCURACY keeps the previous estimate
+// (and its altT — which is what later marks the value stale), accepted
+// readings blend in to damp the meter-scale jumps between fixes.
+function filterAltitude(prev, fix) {
+  const usable = fix.alt != null &&
+    (fix.altAcc == null || fix.altAcc <= ALT_MAX_ACCURACY);
+  if (!usable) {
+    return prev
+      ? { alt: prev.alt, altAcc: prev.altAcc, altT: prev.altT || 0 }
+      : { alt: null, altAcc: null, altT: 0 };
+  }
+  if (!prev || prev.alt == null || fix.t - (prev.altT || 0) > GAP_WARN_MS) {
+    return { alt: fix.alt, altAcc: fix.altAcc, altT: fix.t };
+  }
+  return {
+    alt: prev.alt + (fix.alt - prev.alt) * ALT_SMOOTH_ALPHA,
+    altAcc: fix.altAcc,
+    altT: fix.t,
+  };
+}
+
 // ---------- state ----------
 const RECORD_MIN_DIST = 5;     // meters: only store a breadcrumb if moved this far
 const RECORD_MIN_TIME = 8000;  // ms: ...or this long since last stored point
@@ -78,6 +101,9 @@ const GPS_JITTER_FACTOR = 1.2; // ignore stored movement inside this accuracy ra
 const GPS_JUMP_SPEED = 8;      // m/s: likely not walking if accuracy is weak
 const GPS_SMOOTH_ALPHA = 0.25; // blend small noisy movements instead of jumping
 const GPS_GOOD_ACCURACY = 35;  // meters: a fix this good ends PDR fallback
+const ALT_MAX_ACCURACY = 30;   // meters: reject altitude readings less certain than this
+const ALT_SMOOTH_ALPHA = 0.3;  // EMA blend for accepted altitude readings
+const ALT_STALE_MS = 30000;    // ms: altitude not refreshed for this long shows as old
 
 // PDR (pedestrian dead reckoning) — indoor fallback when GPS degrades.
 // Steps are detected from the accelerometer, heading comes from the compass,
@@ -410,6 +436,7 @@ function onFix(pos) {
   }
   state.pdr.weakStreak = 0;
   state.pdr.lastFixTime = pos.timestamp;
+  fix = { ...fix, ...filterAltitude(prevCurrent, fix) };
   state.current = fix;
 
   if (!state.recording) {
@@ -504,7 +531,11 @@ function onStep() {
   const next = destination(state.current, state.heading, PDR_STEP_LENGTH);
   const fix = {
     lat: next.lat, lon: next.lon,
+    // PDR has no vertical channel — carry the altitude AND its altT, so the
+    // UI shows it as old instead of pretending it tracks stairs/elevators
     alt: state.current.alt,
+    altAcc: state.current.altAcc,
+    altT: state.current.altT || 0,
     acc: Math.round(state.pdr.baseAcc + state.pdr.walked * PDR_DRIFT_RATE),
     t: Date.now(),
     est: true, // estimated, not a GPS fix
@@ -869,6 +900,21 @@ function fmtDist(m) {
 }
 function fmtAlt(a) { return (a == null) ? 'n/a' : Math.round(a) + ' m'; }
 
+// Altitude stops refreshing indoors (weak fixes are dropped, PDR carries the
+// last value) — past ALT_STALE_MS it's a memory, not a measurement.
+function altIsStale(cur) {
+  return cur != null && cur.alt != null && Date.now() - (cur.altT || 0) > ALT_STALE_MS;
+}
+
+function fmtLiveAlt(cur) {
+  if (!cur) return '—';
+  if (cur.alt == null) return 'n/a';
+  let txt = Math.round(cur.alt) + ' m';
+  if (cur.altAcc != null) txt += ' ±' + Math.round(cur.altAcc);
+  if (altIsStale(cur)) txt += ' (old)';
+  return txt;
+}
+
 function render() {
   updateMapRotation(); // heading may have changed; render is rAF-coalesced
   els.ptCount.textContent = state.trail.length;
@@ -881,7 +927,7 @@ function render() {
   els.acc.textContent = !cur ? '—'
     : cur.est ? '≈' + Math.round(cur.acc) + ' m (PDR)'
     : Math.round(cur.acc) + ' m';
-  els.alt.textContent = cur ? fmtAlt(cur.alt) : '—';
+  els.alt.textContent = fmtLiveAlt(cur);
   els.head.textContent = state.heading != null ? Math.round(state.heading) + '°' : '—';
 
   if (!cur || !tgt) {
@@ -897,7 +943,7 @@ function render() {
 
   const altD = (cur.alt != null && tgt.alt != null) ? (tgt.alt - cur.alt) : null;
   els.altDiff.textContent = altD == null ? 'n/a'
-    : (altD >= 0 ? '+' : '') + Math.round(altD) + ' m';
+    : (altD >= 0 ? '+' : '') + Math.round(altD) + ' m' + (altIsStale(cur) ? ' (old)' : '');
 
   // Orient the 3D arrow at the target in real space. The browser interpolates
   // between rotate3d transforms via quaternion slerp, so 359°→0° takes the
