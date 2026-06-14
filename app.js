@@ -67,11 +67,27 @@ function smoothFix(prev, fix) {
   };
 }
 
+// EMA weight for an accepted altitude reading, scaled by its reported accuracy:
+// a tight reading gets ALT_SMOOTH_ALPHA, one near the ALT_MAX_ACCURACY gate gets
+// down to ALT_MIN_ALPHA. Less trustworthy readings move the estimate less.
+function altAlpha(altAcc) {
+  if (altAcc == null) return (ALT_SMOOTH_ALPHA + ALT_MIN_ALPHA) / 2;
+  const q = Math.min(1, Math.max(0, altAcc / ALT_MAX_ACCURACY)); // 0 best … 1 worst
+  return ALT_SMOOTH_ALPHA + (ALT_MIN_ALPHA - ALT_SMOOTH_ALPHA) * q;
+}
+
 // Altitude analog of smoothFix. GPS vertical error is 2-3x horizontal and is
 // reported separately (altitudeAccuracy), so altitude gets its own gate + EMA:
 // a reading less certain than ALT_MAX_ACCURACY keeps the previous estimate
-// (and its altT — which is what later marks the value stale), accepted
-// readings blend in to damp the meter-scale jumps between fixes.
+// (and its altT — which is what later marks the value stale), accepted readings
+// blend in. Two things stop a "sudden jump while standing still":
+//  - we snap to a raw reading only after a real gap *between fixes* (you were
+//    untracked and may have changed floors), never just because altitude went
+//    stale while horizontal tracking continued through noisy vertical fixes;
+//  - a reading that disagrees with the running estimate by more than
+//    ALT_OUTLIER_SIGMA sigmas is damped to the floor weight instead of yanking
+//    the value. A *sustained* real change still wins: as the estimate creeps
+//    toward it the deviation shrinks and full weight returns.
 function filterAltitude(prev, fix) {
   const usable = fix.alt != null &&
     (fix.altAcc == null || fix.altAcc <= ALT_MAX_ACCURACY);
@@ -80,11 +96,14 @@ function filterAltitude(prev, fix) {
       ? { alt: prev.alt, altAcc: prev.altAcc, altT: prev.altT || 0 }
       : { alt: null, altAcc: null, altT: 0 };
   }
-  if (!prev || prev.alt == null || fix.t - (prev.altT || 0) > GAP_WARN_MS) {
+  if (!prev || prev.alt == null || fix.t - prev.t > GAP_WARN_MS) {
     return { alt: fix.alt, altAcc: fix.altAcc, altT: fix.t };
   }
+  const sigma = fix.altAcc || ALT_MAX_ACCURACY;
+  const outlier = Math.abs(fix.alt - prev.alt) > ALT_OUTLIER_SIGMA * sigma;
+  const alpha = outlier ? ALT_MIN_ALPHA : altAlpha(fix.altAcc);
   return {
-    alt: prev.alt + (fix.alt - prev.alt) * ALT_SMOOTH_ALPHA,
+    alt: prev.alt + (fix.alt - prev.alt) * alpha,
     altAcc: fix.altAcc,
     altT: fix.t,
   };
@@ -102,7 +121,9 @@ const GPS_JUMP_SPEED = 8;      // m/s: likely not walking if accuracy is weak
 const GPS_SMOOTH_ALPHA = 0.25; // blend small noisy movements instead of jumping
 const GPS_GOOD_ACCURACY = 35;  // meters: a fix this good ends PDR fallback
 const ALT_MAX_ACCURACY = 30;   // meters: reject altitude readings less certain than this
-const ALT_SMOOTH_ALPHA = 0.3;  // EMA blend for accepted altitude readings
+const ALT_SMOOTH_ALPHA = 0.3;  // EMA blend for a tight (best-accuracy) reading
+const ALT_MIN_ALPHA = 0.08;    // ...floor weight for a marginal or outlier reading
+const ALT_OUTLIER_SIGMA = 2;   // readings deviating beyond this × accuracy are damped
 const ALT_STALE_MS = 30000;    // ms: altitude not refreshed for this long shows as old
 
 // PDR (pedestrian dead reckoning) — indoor fallback when GPS degrades.
