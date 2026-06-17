@@ -59,14 +59,20 @@ Then in your phone browser use **Add to Home Screen** to install it as an app
 
 ## Notes & limits
 
-- **Altitude** comes from the phone's GPS and is often missing or off by tens of
-  meters — treat it as best-effort. Shows `n/a` when unavailable. Readings with
-  poor vertical accuracy are rejected and the rest smoothed (weighted by their
-  accuracy, with lone spikes damped so a stationary reading never jumps); the
-  readout shows the uncertainty (`412 m ±8`). Indoors GPS altitude stops, so after
-  ~30 s without a fresh reading it is flagged `(old)` — elevator or stair
-  height changes are invisible to GPS, and browsers expose no barometer to
-  measure them.
+- **Altitude (web)** comes from the phone's GPS and is often missing or off by
+  tens of meters — treat it as best-effort. Shows `n/a` when unavailable.
+  Readings with poor vertical accuracy are rejected and the rest smoothed
+  (weighted by their accuracy, with lone spikes damped so a stationary reading
+  never jumps); the readout shows the uncertainty (`412 m ±8`). Indoors GPS
+  altitude stops, so after ~30 s without a fresh reading it is flagged `(old)` —
+  elevator or stair height changes are invisible to GPS, and browsers expose no
+  barometer to measure them.
+- **Altitude (native Android app)** adds the phone's **barometer**, the only
+  sensor that sees an elevator. Air pressure tracks vertical movement to ~0.1 m,
+  so the app fuses it with GPS: the barometer drives fast relative change while
+  GPS slowly anchors the absolute level. The readout shows `412 m ±2 ·baro` and
+  keeps moving in elevators and stairwells where the web version freezes. See
+  **Native Android app** below.
 - **iOS** asks for compass (motion) permission on the first Rec or Find tap —
   allow it.
 - **Background tracking is limited.** Mobile browsers pause GPS when the screen
@@ -89,13 +95,55 @@ Then in your phone browser use **Add to Home Screen** to install it as an app
 - A breadcrumb is stored when you've moved ≥ 5 m or every ≥ 8 s (tunable at the
   top of `app.js`).
 
+## Native Android app (Capacitor)
+
+The same `app.js` ships two ways: the web PWA above, and a native Android app via
+[Capacitor](https://capacitorjs.com). The native build unlocks the **barometer**
+(`Sensor.TYPE_PRESSURE`) through a small custom plugin — the one altitude source
+browsers can't reach. Everything is feature-detected, so the identical code runs
+on the web (GPS-only) and in the app (GPS + barometer); the web files stay at the
+repo root for Cloudflare Pages, and `npm run build:web` stages them into `www/`.
+
+### Prerequisites
+- Node 18+ and the **Android SDK** (platform 34, build-tools 34).
+- A **JDK 17** (Temurin/OpenJDK). Point Gradle at it via `JAVA_HOME` or
+  `org.gradle.java.home` in `android/gradle.properties`.
+
+### Build a debug APK
+```bash
+npm install
+npm run android:assemble      # build:web → cap sync → gradlew assembleDebug
+# → android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+Or open the project in Android Studio: `npm run android:open`.
+
+### How the barometric fusion works
+- `android/.../BarometerPlugin.java` streams `{ pressure, altitude, timestamp }`
+  events to JS (`Barometer` Capacitor plugin, registered in `MainActivity`).
+- `app.js` runs a **complementary filter**: each pressure sample applies its
+  altitude *delta* (fast, catches elevators); each trusted GPS fix nudges the
+  fused value toward GPS's absolute altitude (slow, corrects weather drift).
+  Poor-accuracy GPS (the indoor case) is ignored so the barometer carries on
+  alone. Single-sample glitches beyond 8 m are dropped. Tunables: the `BARO_*`
+  constants near the top of `app.js`.
+- Devices without a barometer fall back to the GPS-only altitude path
+  automatically.
+
+> iOS isn't wired up here (no Mac to build on), but the JS side is
+> platform-agnostic — adding an iOS `CMAltimeter` plugin with the same
+> `Barometer` interface is all that's needed.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `index.html` | UI |
 | `style.css` | styles |
-| `app.js` | tracking, geo math, compass, map, storage |
+| `app.js` | tracking, geo math, compass, map, storage, barometric fusion |
 | `sw.js` | service worker (offline app shell) |
 | `manifest.json` | PWA install metadata |
 | `icons/` | app icons |
+| `capacitor.config.json` | Capacitor app config (appId, webDir) |
+| `scripts/copy-web.mjs` | stages root web assets into `www/` for Capacitor |
+| `android/` | native Android project (incl. `BarometerPlugin.java`) |

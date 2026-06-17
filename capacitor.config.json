@@ -1,0 +1,13 @@
+{
+  "appId": "com.lueapp.spatialtracking",
+  "appName": "Spatial Tracking",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "Geolocation": {
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    }
+  }
+}

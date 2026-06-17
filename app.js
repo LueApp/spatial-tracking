@@ -126,6 +126,16 @@ const ALT_MIN_ALPHA = 0.08;    // ...floor weight for a marginal or outlier read
 const ALT_OUTLIER_SIGMA = 2;   // readings deviating beyond this × accuracy are damped
 const ALT_STALE_MS = 30000;    // ms: altitude not refreshed for this long shows as old
 
+// Barometric fusion (native app only — the browser exposes no pressure sensor).
+// The barometer gives precise *relative* altitude but no absolute reference, so
+// we run a complementary filter: every pressure sample applies its altitude
+// delta (fast — catches elevators/stairs), and every trusted GPS fix nudges the
+// fused value toward GPS's absolute level (slow — corrects weather/sensor drift).
+const BARO_ALT_ACC = 1.5;            // m: vertical uncertainty reported while the barometer drives altitude
+const BARO_GPS_CORRECT_ALPHA = 0.02; // per trusted GPS fix, fraction pulled toward GPS absolute altitude
+const BARO_GPS_MAX_VACC = 25;        // m: GPS vertical accuracy must beat this to correct baro drift
+const BARO_MAX_STEP = 8;             // m: drop a single sample jumping more than this (sensor glitch)
+
 // PDR (pedestrian dead reckoning) — indoor fallback when GPS degrades.
 // Steps are detected from the accelerometer, heading comes from the compass,
 // and the position estimate advances PDR_STEP_LENGTH per step from the last
@@ -167,7 +177,29 @@ const state = {
     walked: 0,        // meters dead-reckoned since GPS was lost
     baseAcc: 0,       // accuracy of the fix we started reckoning from
   },
+  baro: {             // barometric altitude (native app only)
+    available: false, // device has a pressure sensor
+    active: false,    // currently listening
+    pressure: null,   // last reading, hPa
+    lastBaroAlt: null,// previous sample's std-atm altitude (for deltas)
+    fusedAlt: null,   // baro-relative + GPS-absolute fused altitude, meters
+    t: 0,             // timestamp of last reading
+    listener: null,   // plugin event subscription handle
+  },
 };
+
+// ---------- native bridge (Capacitor) ----------
+// In the Android/iOS app, Capacitor injects window.Capacitor with registerPlugin.
+// In the plain web PWA it's absent, so every native path below no-ops and the
+// app falls back to GPS-only altitude exactly as before.
+const Native = {
+  isNative: !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function'
+    && window.Capacitor.isNativePlatform()),
+  barometer: null,
+};
+if (Native.isNative && typeof window.Capacitor.registerPlugin === 'function') {
+  Native.barometer = window.Capacitor.registerPlugin('Barometer');
+}
 
 // ---------- persistence ----------
 function defaultRecordName(t = Date.now()) {
@@ -388,6 +420,7 @@ async function doStart(mode = state.pendingMode || 'recording') {
   hidePreflight();
   await requestCompass();   // iOS needs this from a tap
   await requestMotion();    // accelerometer for indoor step counting (PDR)
+  await startBarometer();   // native pressure sensor for precise altitude (no-op on web)
   await requestWakeLock();  // keep screen awake so tracking continues
 
   ensureActiveRecord();
@@ -419,6 +452,7 @@ function stop() {
   state.pdr.lastFixTime = 0;
   clearTimeout(state.gapTimer);
   stopMotion();
+  stopBarometer();
   releaseWakeLock();
   syncControls();
   setStatus('stopped', 'idle');
@@ -457,7 +491,14 @@ function onFix(pos) {
   }
   state.pdr.weakStreak = 0;
   state.pdr.lastFixTime = pos.timestamp;
-  fix = { ...fix, ...filterAltitude(prevCurrent, fix) };
+  if (state.baro.active && state.baro.fusedAlt != null) {
+    // Barometer owns altitude; GPS only nudges its absolute level.
+    correctFusedFromGps(fix.alt, fix.altAcc);
+    fix = { ...fix, alt: state.baro.fusedAlt, altAcc: BARO_ALT_ACC, altT: pos.timestamp };
+  } else {
+    if (state.baro.active) correctFusedFromGps(fix.alt, fix.altAcc); // seed before first delta
+    fix = { ...fix, ...filterAltitude(prevCurrent, fix) };
+  }
   state.current = fix;
 
   if (!state.recording) {
@@ -566,6 +607,77 @@ function onStep() {
   setStatus(statusText(), 'tracking');
   drawTrail();
   render();
+}
+
+// ---------- barometric altitude (native app only) ----------
+async function startBarometer() {
+  if (!Native.barometer) return;
+  try {
+    const { available } = await Native.barometer.isAvailable();
+    state.baro.available = !!available;
+    if (!available) return;
+    if (!state.baro.listener) {
+      state.baro.listener = await Native.barometer.addListener('reading', applyBaroReading);
+    }
+    state.baro.lastBaroAlt = null; // restart deltas cleanly
+    await Native.barometer.start({ frequency: 'ui' });
+    state.baro.active = true;
+  } catch (e) {
+    console.warn('barometer unavailable', e);
+    state.baro.active = false;
+  }
+}
+
+async function stopBarometer() {
+  state.baro.active = false;
+  state.baro.lastBaroAlt = null;
+  if (!Native.barometer) return;
+  try { await Native.barometer.stop(); } catch { /* ignore */ }
+}
+
+// Each pressure sample carries an absolute-reference altitude; its *change*
+// since the last sample is the trustworthy signal (the reference cancels), so
+// we apply that delta to the fused altitude. This is what makes an elevator or
+// staircase register even when GPS and the step counter see nothing.
+function applyBaroReading(r) {
+  const b = state.baro;
+  b.available = true;
+  b.pressure = r.pressure;
+  b.t = r.timestamp;
+  const alt = r.altitude;
+  if (alt == null || Number.isNaN(alt)) return;
+
+  if (b.lastBaroAlt == null) {
+    b.lastBaroAlt = alt;
+    if (b.fusedAlt == null) {
+      b.fusedAlt = (state.current && state.current.alt != null) ? state.current.alt : alt;
+    }
+    return;
+  }
+  const delta = alt - b.lastBaroAlt;
+  b.lastBaroAlt = alt;
+  if (Math.abs(delta) > BARO_MAX_STEP) return; // implausible single-sample jump — sensor glitch
+  if (b.fusedAlt == null) b.fusedAlt = alt;
+  b.fusedAlt += delta;
+
+  // Reflect live so the readout moves in an elevator (no GPS change, no steps).
+  if (state.current) {
+    state.current.alt = b.fusedAlt;
+    state.current.altAcc = BARO_ALT_ACC;
+    state.current.altT = Date.now();
+  }
+  scheduleRender();
+}
+
+// Slowly steer the fused altitude toward GPS's absolute level. Only a confident
+// vertical fix is trusted; indoors (where GPS altitude is worst) it's ignored
+// and the barometer carries the altitude on its own.
+function correctFusedFromGps(gpsAlt, altAcc) {
+  const b = state.baro;
+  if (gpsAlt == null) return;
+  if (b.fusedAlt == null) { b.fusedAlt = gpsAlt; return; }
+  if (altAcc != null && altAcc > BARO_GPS_MAX_VACC) return;
+  b.fusedAlt += (gpsAlt - b.fusedAlt) * BARO_GPS_CORRECT_ALPHA;
 }
 
 function onGeoError(err) {
@@ -932,7 +1044,8 @@ function fmtLiveAlt(cur) {
   if (cur.alt == null) return 'n/a';
   let txt = Math.round(cur.alt) + ' m';
   if (cur.altAcc != null) txt += ' ±' + Math.round(cur.altAcc);
-  if (altIsStale(cur)) txt += ' (old)';
+  if (state.baro.active) txt += ' ·baro';   // barometer-driven: precise + always fresh
+  else if (altIsStale(cur)) txt += ' (old)';
   return txt;
 }
 
