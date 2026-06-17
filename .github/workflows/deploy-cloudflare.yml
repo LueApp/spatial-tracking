@@ -1,0 +1,15 @@
+name: Deploy to Cloudflare on tag push
+
+# The APK + site are built by Cloudflare Workers Builds (npm run build →
+# scripts/build-cloudflare-pages.sh). This workflow just kicks off that build
+# when a vX.Y.Z tag is pushed. Set CLOUDFLARE_DEPLOY_HOOK_URL in repo secrets.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare deploy hook
+        run: curl -sS -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK_URL }}"

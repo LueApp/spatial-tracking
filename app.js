@@ -306,6 +306,7 @@ const els = {
   start: $('startBtn'), find: $('findBtn'), mark: $('markBtn'), stop: $('stopBtn'), clear: $('clearBtn'),
   map: $('map'), mapToggle: $('mapToggle'), mapHint: $('mapHint'), mapRotate: $('mapRotate'),
   wpList: $('wpList'), lockHint: $('lockHint'),
+  getApp: $('getApp'), apkLink: $('apkLink'), apkMeta: $('apkMeta'),
   errBanner: $('errBanner'), errTitle: $('errTitle'), errMsg: $('errMsg'),
   errSteps: $('errSteps'), errDismiss: $('errDismiss'), errRetry: $('errRetry'),
   preflight: $('preflight'), preflightOk: $('preflightOk'), preflightCancel: $('preflightCancel'),
@@ -1346,6 +1347,22 @@ els.wpList.addEventListener('click', e => {
   if (del) deleteWaypoint(del);
 });
 
+// Offer the Android APK on the web only — pointless inside the app itself.
+// Reads www/downloads/metadata.json (written by the CI build) for version/size,
+// but the static link works even if that fetch fails.
+async function setupAppDownload() {
+  if (!els.getApp || Native.isNative) return;
+  els.getApp.classList.remove('hidden');
+  try {
+    const res = await fetch('downloads/metadata.json', { cache: 'no-cache' });
+    if (!res.ok) return;
+    const m = await res.json();
+    if (m.filename) els.apkLink.href = 'downloads/' + m.filename;
+    const mb = m.bytes ? ' · ' + (m.bytes / 1048576).toFixed(1) + ' MB' : '';
+    els.apkMeta.textContent = (m.version ? m.version : '') + mb;
+  } catch { /* no metadata yet — leave the static link */ }
+}
+
 // ---------- boot ----------
 load();
 refreshRecordOptions();
@@ -1353,6 +1370,7 @@ refreshTargetOptions();
 renderWaypointList();
 render();
 syncControls();
+setupAppDownload();
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }

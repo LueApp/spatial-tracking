@@ -109,7 +109,7 @@ repo root for Cloudflare Pages, and `npm run build:web` stages them into `www/`.
 - A **JDK 17** (Temurin/OpenJDK). Point Gradle at it via `JAVA_HOME` or
   `org.gradle.java.home` in `android/gradle.properties`.
 
-### Build a debug APK
+### Build a debug APK locally
 ```bash
 npm install
 npm run android:assemble      # build:web → cap sync → gradlew assembleDebug
@@ -117,6 +117,29 @@ npm run android:assemble      # build:web → cap sync → gradlew assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 Or open the project in Android Studio: `npm run android:open`.
+
+### CI build + download link (Cloudflare)
+The APK is also built automatically and offered for download from the deployed
+site, mirroring the `music_hub` setup:
+
+- `npm run build` → `scripts/build-cloudflare-pages.sh` provisions a JDK 17 and
+  the Android SDK (API 34) if absent, builds the debug APK, stages the web app
+  into `www/`, and bundles the APK at `www/downloads/` with a `metadata.json`.
+- `wrangler.jsonc` serves `www/`, so the deployed site exposes a permanent
+  **`/downloads/spatial-tracking.apk`** plus a versioned copy. The home screen
+  shows a *Get the Android app* card (hidden when already running in the app)
+  that reads `metadata.json` for the version and size.
+- `.github/workflows/deploy-cloudflare.yml` triggers a Cloudflare deploy hook on
+  every `v*` tag push (set `CLOUDFLARE_DEPLOY_HOOK_URL` in repo secrets).
+
+**Cloudflare project settings:** Build command `npm run build`, build output
+directory `www`. No secrets are needed for the debug APK. (`JDK_URL` /
+`CMDLINE_TOOLS_VERSION` can be overridden via env if the defaults are slow.)
+
+> The CI ships a **debug-signed** APK so it installs by sideload with zero
+> keystore setup. For a Play-ready signed release, add an `ANDROID_KEYSTORE_*`
+> secret and switch the build to `assembleRelease` — see `music_hub` for the
+> exact keystore-from-base64 pattern.
 
 ### How the barometric fusion works
 - `android/.../BarometerPlugin.java` streams `{ pressure, altitude, timestamp }`
@@ -146,4 +169,8 @@ Or open the project in Android Studio: `npm run android:open`.
 | `icons/` | app icons |
 | `capacitor.config.json` | Capacitor app config (appId, webDir) |
 | `scripts/copy-web.mjs` | stages root web assets into `www/` for Capacitor |
+| `scripts/build-cloudflare-pages.sh` | CI build: APK + `www/` with bundled download |
+| `scripts/setup-android-sdk.sh` | provisions the Android SDK on a clean runner |
+| `scripts/prepare-apk.mjs` | copies the APK + `metadata.json` into `www/downloads/` |
 | `android/` | native Android project (incl. `BarometerPlugin.java`) |
+| `.github/workflows/` | tag-push → Cloudflare deploy hook |

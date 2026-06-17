@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "bash scripts/build-cloudflare-pages.sh",
     "build:web": "node scripts/copy-web.mjs",
     "sync": "npm run build:web && cap sync android",
     "android:assemble": "npm run sync && cd android && ./gradlew assembleDebug",
