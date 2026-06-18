@@ -9,6 +9,7 @@
     "build:web": "node scripts/copy-web.mjs",
     "sync": "npm run build:web && cap sync android",
     "android:assemble": "npm run sync && cd android && ./gradlew assembleDebug",
+    "android:dev": "npm run build:web && node scripts/cap-dev.mjs && cd android && ./gradlew assembleDebug",
     "android:open": "npm run sync && cap open android"
   },
   "dependencies": {

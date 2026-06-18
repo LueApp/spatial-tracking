@@ -118,6 +118,22 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 Or open the project in Android Studio: `npm run android:open`.
 
+### Fast iteration: load from the live site (no reinstall per change)
+A bundled APK ships a frozen copy of `app.js`, so every web change needs a
+rebuild + reinstall. For active development, build a **dev APK** that loads the
+deployed site instead (Capacitor `server.url`) — install it once, then web
+deploys arrive over the air on relaunch:
+
+```bash
+npm run android:dev                                   # → production site
+CAP_SERVER_URL=https://develop.spatial-tracking.lue-app.com npm run android:dev   # → a dev page
+```
+
+`server.url` is injected only for this build; the committed
+`capacitor.config.json` stays in bundled mode, so the standalone release / site
+download is unaffected. Native plugins (barometer, geolocation) work the same in
+both modes. Dev mode needs internet to launch (no offline cold start).
+
 ### CI build + download link (Cloudflare)
 The APK is also built automatically and offered for download from the deployed
 site, mirroring the `music_hub` setup:
