@@ -135,6 +135,7 @@ const BARO_ALT_ACC = 1.5;            // m: vertical uncertainty reported while t
 const BARO_GPS_CORRECT_ALPHA = 0.02; // per trusted GPS fix, fraction pulled toward GPS absolute altitude
 const BARO_GPS_MAX_VACC = 25;        // m: GPS vertical accuracy must beat this to correct baro drift
 const BARO_MAX_STEP = 8;             // m: drop a single sample jumping more than this (sensor glitch)
+const BARO_SMOOTH_ALPHA = 0.2;       // low-pass on raw pressure-altitude to kill ±1-2 m sample jitter
 
 // PDR (pedestrian dead reckoning) — indoor fallback when GPS degrades.
 // Steps are detected from the accelerometer, heading comes from the compass,
@@ -178,10 +179,12 @@ const state = {
     baseAcc: 0,       // accuracy of the fix we started reckoning from
   },
   baro: {             // barometric altitude (native app only)
+    checked: false,   // we've asked the device whether it has a pressure sensor
     available: false, // device has a pressure sensor
     active: false,    // currently listening
     pressure: null,   // last reading, hPa
-    lastBaroAlt: null,// previous sample's std-atm altitude (for deltas)
+    smoothAlt: null,  // low-passed raw pressure-altitude
+    lastBaroAlt: null,// previous smoothed sample (for deltas)
     fusedAlt: null,   // baro-relative + GPS-absolute fused altitude, meters
     t: 0,             // timestamp of last reading
     listener: null,   // plugin event subscription handle
@@ -197,8 +200,15 @@ const Native = {
     && window.Capacitor.isNativePlatform()),
   barometer: null,
 };
-if (Native.isNative && typeof window.Capacitor.registerPlugin === 'function') {
-  Native.barometer = window.Capacitor.registerPlugin('Barometer');
+// Resolve the custom plugin robustly: the no-bundler runtime may expose it via
+// registerPlugin(), or already as Capacitor.Plugins.Barometer, depending on
+// version. Try both so a missing registerPlugin global doesn't silently kill it.
+if (Native.isNative) {
+  const C = window.Capacitor;
+  try {
+    if (typeof C.registerPlugin === 'function') Native.barometer = C.registerPlugin('Barometer');
+    else if (C.Plugins && C.Plugins.Barometer) Native.barometer = C.Plugins.Barometer;
+  } catch (e) { console.warn('Barometer plugin resolve failed', e); }
 }
 
 // ---------- persistence ----------
@@ -612,21 +622,25 @@ function onStep() {
 
 // ---------- barometric altitude (native app only) ----------
 async function startBarometer() {
-  if (!Native.barometer) return;
+  state.baro.checked = true; // we ran the check; render() can now report the result
+  if (!Native.isNative) return;
+  if (!Native.barometer) { console.warn('Barometer plugin not resolved'); return; }
   try {
     const { available } = await Native.barometer.isAvailable();
     state.baro.available = !!available;
-    if (!available) return;
+    if (!available) { console.warn('device has no pressure sensor'); render(); return; }
     if (!state.baro.listener) {
       state.baro.listener = await Native.barometer.addListener('reading', applyBaroReading);
     }
+    state.baro.smoothAlt = null;   // restart the low-pass cleanly
     state.baro.lastBaroAlt = null; // restart deltas cleanly
     await Native.barometer.start({ frequency: 'ui' });
     state.baro.active = true;
   } catch (e) {
-    console.warn('barometer unavailable', e);
+    console.warn('barometer start failed', e);
     state.baro.active = false;
   }
+  render();
 }
 
 async function stopBarometer() {
@@ -645,8 +659,13 @@ function applyBaroReading(r) {
   b.available = true;
   b.pressure = r.pressure;
   b.t = r.timestamp;
-  const alt = r.altitude;
-  if (alt == null || Number.isNaN(alt)) return;
+  const raw = r.altitude;
+  if (raw == null || Number.isNaN(raw)) return;
+
+  // Low-pass the raw pressure-altitude first: it jitters ±1-2 m sample to
+  // sample, but the elevator/stair signal is a sustained ramp that survives.
+  b.smoothAlt = (b.smoothAlt == null) ? raw : b.smoothAlt + (raw - b.smoothAlt) * BARO_SMOOTH_ALPHA;
+  const alt = b.smoothAlt;
 
   if (b.lastBaroAlt == null) {
     b.lastBaroAlt = alt;
@@ -1046,6 +1065,7 @@ function fmtLiveAlt(cur) {
   let txt = Math.round(cur.alt) + ' m';
   if (cur.altAcc != null) txt += ' ±' + Math.round(cur.altAcc);
   if (state.baro.active) txt += ' ·baro';   // barometer-driven: precise + always fresh
+  else if (Native.isNative && state.baro.checked && !state.baro.available) txt += ' (no barometer)';
   else if (altIsStale(cur)) txt += ' (old)';
   return txt;
 }
